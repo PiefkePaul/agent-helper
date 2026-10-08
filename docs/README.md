@@ -7,5 +7,5 @@
 | [development-and-operations.md](development-and-operations.md) | How development and live operations are kept apart, and how operations reports problems |
 | [operations.md](operations.md) | How the service is run, deployed, backed up, and monitored (skeleton) |
 
-Architecture documentation will be added once the open questions are settled. Decisions will be
-recorded as short decision records under `docs/decisions/`.
+Architecture documentation will be added once the open questions are settled. Decisions are
+recorded as short decision records under [`decisions/`](decisions/).
