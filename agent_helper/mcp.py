@@ -263,6 +263,13 @@ def _decode_header(value: str | None) -> str | None:
     return value
 
 
+def _valid_id(msg_id: Any) -> bool:
+    """MCP request ids are strings or integers (never null, booleans, fractions, or structures)."""
+    if isinstance(msg_id, str):
+        return len(msg_id) <= 256
+    return isinstance(msg_id, int) and not isinstance(msg_id, bool)
+
+
 def _error(msg_id: Any, code: int, message: str, status: int, data: Any = None) -> JSONResponse:
     error: dict[str, Any] = {"code": code, "message": message}
     if data is not None:
@@ -319,12 +326,16 @@ class McpEndpoint:
 
         try:
             msg = json.loads(await request.body())
-        except (ValueError, UnicodeDecodeError):
+            # Lone surrogates (valid JSON escapes, invalid Unicode) could not be stored or echoed back.
+            json.dumps(msg, ensure_ascii=False).encode("utf-8")
+        except (ValueError, UnicodeError, RecursionError):
             return _error(None, PARSE_ERROR, "parse error: the body must be one JSON-RPC message", 400)
         if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0" or not isinstance(msg.get("method"), str):
             return _error(None, INVALID_REQUEST, "invalid request: send one JSON-RPC 2.0 request per POST", 400)
         if "id" not in msg:
             return Response(status_code=202)  # notifications need no answer; none of them changes anything here
+        if not _valid_id(msg["id"]):
+            return _error(None, INVALID_REQUEST, "invalid request: id must be a string or an integer", 400)
 
         msg_id, method = msg["id"], msg["method"]
         params = msg.get("params", {})
@@ -395,7 +406,8 @@ class McpEndpoint:
         return None
 
     def _call_tool(self, request: Request, msg_id: Any, params: dict[str, Any]) -> JSONResponse:
-        tool = self.tools.get(params.get("name"))  # type: ignore[arg-type]
+        name = params.get("name")
+        tool = self.tools.get(name) if isinstance(name, str) else None
         if tool is None:
             return _error(msg_id, INVALID_PARAMS, f"Unknown tool: {params.get('name')!r}", 200)
         arguments = params.get("arguments", {})

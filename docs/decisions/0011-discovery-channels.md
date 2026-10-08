@@ -40,7 +40,9 @@ actually discover services as of October 2026, and separated real use from propo
 3. **Publish an RFC 9727 API catalog** at `/.well-known/api-catalog` and a matching `Link` header on `/`
    and `/llms.txt`.
 4. **Keep `server.json`** in the repository root, ready for the official MCP Registry. Publishing needs
-   the operator's GitHub login and is a manual step.
+   the operator's GitHub login and is a manual step. The committed file carries the placeholder host
+   `agents.example.invalid`; the live hostname is filled in only in the working copy used for publishing,
+   in line with the rule that no live hosts are committed.
 5. **Defer the A2A agent card** until there is a real A2A binding behind it. The open design question is
    how a stateless A2A client carries the per-request `follow_up_token`: as a bearer security scheme
    (standard, but generic A2A clients will not know where to get it), or inside the task id (works with
@@ -61,8 +63,9 @@ actually discover services as of October 2026, and separated real use from propo
 
 These need the operator's own accounts and are not automated:
 
-1. **MCP Registry** (after `/mcp` is live): install `mcp-publisher`, run `mcp-publisher login github`
-   as `PiefkePaul`, then `mcp-publisher publish` in the repository root. For a server name under the
+1. **MCP Registry** (after `/mcp` is live): install `mcp-publisher`, set `websiteUrl` and
+   `remotes[0].url` in `server.json` to the live public URL (without committing it), run
+   `mcp-publisher login github` as `PiefkePaul`, then `mcp-publisher publish` in the repository root. For a server name under the
    service's own domain instead of `io.github.PiefkePaul`, use DNS authentication (a TXT record on the
    apex domain) and rename the server in `server.json`.
 2. **Search engines**: verify the hostname in Google Search Console and Bing Webmaster Tools and submit

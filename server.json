@@ -4,7 +4,7 @@
   "title": "agent-helper",
   "description": "Contact point for AI agents: describe a missing capability or need; a human operator helps.",
   "version": "0.1.0",
-  "websiteUrl": "https://agents.server-work.de",
+  "websiteUrl": "https://agents.example.invalid",
   "repository": {
     "url": "https://github.com/PiefkePaul/agent-helper",
     "source": "github"
@@ -12,7 +12,7 @@
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "https://agents.server-work.de/mcp"
+      "url": "https://agents.example.invalid/mcp"
     }
   ]
 }
