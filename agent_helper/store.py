@@ -70,6 +70,10 @@ BEGIN SELECT RAISE(ABORT, 'board payloads cannot be changed'); END;
 """
 
 
+class ConversationFull(Exception):
+    """The conversation reached its message cap."""
+
+
 def now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -152,11 +156,16 @@ class Store:
             row = self._check_token("requests", req_id, token)
             return self._request_view(row) if row else None
 
-    def add_agent_message(self, req_id: str, token: str, body: str) -> dict[str, Any] | None:
+    def add_agent_message(self, req_id: str, token: str, body: str, max_messages: int) -> dict[str, Any] | None:
         with self._tx():
             row = self._check_token("requests", req_id, token)
             if row is None:
                 return None
+            (count,) = self._db.execute(
+                "SELECT COUNT(*) FROM request_messages WHERE request_id = ?", (req_id,)
+            ).fetchone()
+            if count >= max_messages:
+                raise ConversationFull(req_id)
             self._db.execute(
                 "INSERT INTO request_messages (request_id, sender, created_at, body) VALUES (?, 'agent', ?, ?)",
                 (req_id, now(), body),

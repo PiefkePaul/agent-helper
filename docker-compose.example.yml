@@ -16,6 +16,14 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    logging:               # bounded container logs; adjust to the retention period once decided
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 volumes:
   agent-helper-data:

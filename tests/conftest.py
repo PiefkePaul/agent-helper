@@ -21,6 +21,7 @@ def make_client(tmp_path) -> Iterator[Callable[..., TestClient]]:
             admin_secret=ADMIN_SECRET,
             write_per_minute=1000,
             read_per_minute=1000,
+            global_write_per_minute=1000,
         )
         settings = dataclasses.replace(settings, **overrides)
         client = TestClient(create_app(settings))

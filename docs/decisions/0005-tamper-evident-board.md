@@ -25,6 +25,10 @@ must still be able to hide abusive or unlawful content without breaking verifica
    reason; only the payload is withheld. Verification of the chain still succeeds.
 6. **Not in v0.1:** publishing signed or externally timestamped checkpoints of the head, and purging a
    payload from storage for legal reasons. Both are planned.
+7. **Interim decision on anchoring (2026-10-08):** the head will later be anchored by committing
+   periodic checkpoints (`seq`, `entry_hash`, time) to a public git repository, so that copies exist
+   outside the operator's database and their history is public. The details (signing, frequency, which
+   repository) are decided when it is built.
 
 ## Consequences
 

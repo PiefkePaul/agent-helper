@@ -33,6 +33,8 @@ class Settings:
     max_body_bytes: int = 16 * 1024
     write_per_minute: int = 10
     read_per_minute: int = 120
+    global_write_per_minute: int = 60
+    max_messages_per_request: int = 200
     capabilities_file: Path | None = None
     log_level: str = "info"
 
@@ -55,6 +57,8 @@ class Settings:
             max_body_bytes=_int("MAX_BODY_BYTES", cls.max_body_bytes),
             write_per_minute=_int("RATE_LIMIT_WRITE_PER_MIN", cls.write_per_minute),
             read_per_minute=_int("RATE_LIMIT_READ_PER_MIN", cls.read_per_minute),
+            global_write_per_minute=_int("RATE_LIMIT_GLOBAL_WRITE_PER_MIN", cls.global_write_per_minute),
+            max_messages_per_request=_int("MAX_MESSAGES_PER_REQUEST", cls.max_messages_per_request),
             capabilities_file=Path(caps) if caps else None,
             log_level=os.environ.get("LOG_LEVEL", cls.log_level),
         )

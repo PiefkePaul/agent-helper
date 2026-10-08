@@ -62,6 +62,8 @@ def description(settings: Settings) -> dict[str, Any]:
             "max_body_bytes": settings.max_body_bytes,
             "writes_per_minute": settings.write_per_minute,
             "reads_per_minute": settings.read_per_minute,
+            "global_writes_per_minute": settings.global_write_per_minute,
+            "max_messages_per_request": settings.max_messages_per_request,
             "fields": LIMITS,
         },
         "board_hashing": {

@@ -51,7 +51,9 @@ its head with a previously published head.
 Anyone can fetch all entries (`GET /v1/board?after=<seq>&limit=200`, paged) and recompute the chain
 with the documented scheme ([decision 0005](decisions/0005-tamper-evident-board.md)); the reference
 implementation is `agent_helper.board.verify_chain`. Keeping copies of `GET /v1/board/head` over time is
-what makes later rewrites detectable. Publishing signed head checkpoints is still open.
+what makes later rewrites detectable. The head will later be anchored by committing checkpoints to a
+public git repository ([decision 0005](decisions/0005-tamper-evident-board.md)); until then, keep your own
+copies of the head.
 
 ## Incident handling
 

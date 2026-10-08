@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import math
@@ -22,6 +23,8 @@ SECURITY_HEADERS = [
 ]
 
 READ_METHODS = {"GET", "HEAD", "OPTIONS"}
+OVERFLOW_KEY = "__overflow__"
+GLOBAL_KEY = "__global__"
 
 
 class TokenBucket:
@@ -33,27 +36,44 @@ class TokenBucket:
         self.max_keys = max_keys
         self._buckets: dict[str, tuple[float, float]] = {}
         self._lock = threading.Lock()
+        self._last_prune = -math.inf
 
     def take(self, key: str, now: float | None = None) -> float:
         """Consume one token. Returns 0 if allowed, otherwise seconds until the next token."""
         now = time.monotonic() if now is None else now
         with self._lock:
+            if key not in self._buckets and len(self._buckets) >= self.max_keys:
+                if now - self._last_prune >= 1.0:
+                    self._prune(now)
+                    self._last_prune = now
+                if len(self._buckets) >= self.max_keys:
+                    # Never forget a client that is currently limited; newcomers share one bucket instead.
+                    key = OVERFLOW_KEY
             tokens, last = self._buckets.get(key, (self.capacity, now))
             tokens = min(self.capacity, tokens + (now - last) * self.rate)
             if tokens >= 1:
                 self._buckets[key] = (tokens - 1, now)
-                self._prune(now)
                 return 0.0
             self._buckets[key] = (tokens, now)
             return (1 - tokens) / self.rate if self.rate > 0 else 60.0
 
     def _prune(self, now: float) -> None:
-        if len(self._buckets) <= self.max_keys:
-            return
+        """Drop buckets that have refilled completely; they carry no state worth keeping."""
         full_after = self.capacity / self.rate if self.rate > 0 else 60.0
         self._buckets = {k: v for k, v in self._buckets.items() if now - v[1] < full_after}
-        if len(self._buckets) > self.max_keys:
-            self._buckets.clear()
+
+
+def _address_key(raw: str) -> str:
+    """Rate-limit key for an address. IPv6 is grouped by /64, the smallest block one subscriber usually gets."""
+    try:
+        addr = ipaddress.ip_address(raw)
+    except ValueError:
+        return raw[:64]
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.IPv6Network((addr, 64), strict=False))
+    return str(addr)
 
 
 def client_key(scope: Scope, trust_proxy_headers: bool) -> str:
@@ -63,9 +83,14 @@ def client_key(scope: Scope, trust_proxy_headers: bool) -> str:
                 # The nearest trusted proxy appends the address it saw as the last element.
                 last = value.decode("latin-1").split(",")[-1].strip()
                 if last:
-                    return last
+                    return _address_key(last)
     client = scope.get("client")
-    return client[0] if client else "unknown"
+    return _address_key(client[0]) if client else "unknown"
+
+
+def _loggable(path: str, max_length: int = 200) -> str:
+    """Escape control characters so a crafted URL cannot forge extra log lines."""
+    return repr(path[:max_length])[1:-1]
 
 
 async def _send_json(send: Send, status: int, body: dict[str, Any], extra: list[tuple[bytes, bytes]]) -> None:
@@ -86,11 +111,13 @@ class GuardMiddleware:
         read_limiter: TokenBucket,
         write_limiter: TokenBucket,
         trust_proxy_headers: bool,
+        global_write_limiter: TokenBucket | None = None,
     ) -> None:
         self.app = app
         self.max_body_bytes = max_body_bytes
         self.read_limiter = read_limiter
         self.write_limiter = write_limiter
+        self.global_write_limiter = global_write_limiter
         self.trust_proxy_headers = trust_proxy_headers
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -104,10 +131,14 @@ class GuardMiddleware:
 
         def done() -> None:
             ms = (time.monotonic() - started) * 1000
-            log.info("%s %s %s %.0fms", method, scope["path"], status_holder["status"], ms)
+            log.info("%s %s %s %.0fms", method, _loggable(scope["path"]), status_holder["status"], ms)
 
-        limiter = self.read_limiter if method in READ_METHODS else self.write_limiter
+        is_read = method in READ_METHODS
+        limiter = self.read_limiter if is_read else self.write_limiter
         wait = limiter.take(client_key(scope, self.trust_proxy_headers))
+        if wait == 0 and not is_read and self.global_write_limiter is not None:
+            # Caps total storage growth no matter how many addresses an abuser controls.
+            wait = self.global_write_limiter.take(GLOBAL_KEY)
         if wait > 0:
             status_holder["status"] = 429
             retry = str(max(1, math.ceil(wait))).encode()

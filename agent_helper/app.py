@@ -8,7 +8,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from . import __version__, discovery
@@ -25,10 +26,12 @@ from .models import (
     ReportDecisionIn,
     ReportIn,
     ReportOut,
+    ReportStatus,
     RequestIn,
     RequestOut,
+    RequestStatus,
 )
-from .store import Store
+from .store import ConversationFull, Store
 
 NOT_FOUND = "not found or wrong token"
 
@@ -66,8 +69,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_body_bytes=settings.max_body_bytes,
         read_limiter=TokenBucket(settings.read_per_minute),
         write_limiter=TokenBucket(settings.write_per_minute),
+        global_write_limiter=TokenBucket(settings.global_write_per_minute),
         trust_proxy_headers=settings.trust_proxy_headers,
     )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+        # Do not echo the submitted input back: it can be large and may not even be encodable.
+        detail = [{"loc": e.get("loc"), "msg": e.get("msg"), "type": e.get("type")} for e in exc.errors()]
+        return JSONResponse({"detail": detail}, status_code=422)
 
     base = settings.public_base_url
     no_store = {"Cache-Control": "no-store"}
@@ -115,7 +125,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @v1.post("/requests/{req_id}/messages", tags=["requests"])
     def add_message(req_id: str, body: MessageIn, authorization: AuthHeader = None) -> RequestOut:
-        found = store.add_agent_message(req_id, _bearer(authorization), body.message)
+        try:
+            found = store.add_agent_message(
+                req_id, _bearer(authorization), body.message, settings.max_messages_per_request
+            )
+        except ConversationFull:
+            raise HTTPException(
+                409, "this conversation is full; start a new request and mention this one's id"
+            ) from None
         if found is None:
             raise HTTPException(404, NOT_FOUND)
         return RequestOut(**found)
@@ -177,7 +194,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     admin = APIRouter(prefix="/admin/v1", dependencies=[Depends(require_admin)], include_in_schema=False)
 
     @admin.get("/requests")
-    def admin_requests(status: str | None = None, limit: Annotated[int, Query(ge=1, le=500)] = 100) -> list[RequestOut]:
+    def admin_requests(
+        status: RequestStatus | None = None, limit: Annotated[int, Query(ge=1, le=500)] = 100
+    ) -> list[RequestOut]:
         return [RequestOut(**r) for r in store.list_requests(status, limit)]
 
     @admin.post("/requests/{req_id}/replies")
@@ -188,7 +207,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return RequestOut(**found)
 
     @admin.get("/reports")
-    def admin_reports(status: str | None = None, limit: Annotated[int, Query(ge=1, le=500)] = 100) -> list[ReportOut]:
+    def admin_reports(
+        status: ReportStatus | None = None, limit: Annotated[int, Query(ge=1, le=500)] = 100
+    ) -> list[ReportOut]:
         return [ReportOut(**r) for r in store.list_reports(status, limit)]
 
     @admin.post("/reports/{rep_id}/decision")

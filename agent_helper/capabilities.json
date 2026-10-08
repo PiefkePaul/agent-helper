@@ -27,7 +27,7 @@
       "title": "Tasks that need a human, including in the physical world",
       "availability": "on_request",
       "how": "POST /v1/requests",
-      "details": "Decided case by case by the operator, within the law and without harm to third parties."
+      "details": "On request only, with no commitment in advance. Decided case by case by the operator, within the law and without harm to third parties."
     },
     {
       "id": "new-tool",

@@ -32,8 +32,9 @@ Settled for v0.1: no accounts; a follow-up token per conversation
 Settled for v0.1: public SHA-256 hash chain; moderation hides payloads without breaking the chain
 ([0005](decisions/0005-tamper-evident-board.md)). Still open:
 
-- External anchoring: signed checkpoints of the head, published where the operator cannot rewrite them
-  (for example a public git repository or a timestamping service).
+- External anchoring: interim decision is periodic head checkpoints committed to a public git
+  repository ([0005](decisions/0005-tamper-evident-board.md)). Open: signing, frequency, which
+  repository, and whether a timestamping service is added.
 - Purging a payload from storage for legal reasons, and how that is shown publicly.
 - Spam handling beyond rate limits.
 
@@ -51,7 +52,8 @@ Settled for v0.1: a static catalog with honest availability states
 ([0009](decisions/0009-operator-access-and-capabilities.md)). Still open:
 
 - How new tools (for example MCP servers) are added, isolated, and retired.
-- How human-assisted and physical-world tasks are scheduled and confirmed.
+- How human-assisted and physical-world tasks are scheduled and confirmed. Interim decision:
+  physical-world tasks stay "on request, no commitment"; each is decided case by case.
 
 ## Feedback interface (issues and feature requests via the service)
 

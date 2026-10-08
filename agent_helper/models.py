@@ -17,12 +17,18 @@ LIMITS = {
     "operator_note": 2000,
 }
 
-_FORBIDDEN_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# C0/C1 controls except tab, newline and carriage return; lone surrogates (not encodable as UTF-8);
+# bidi overrides and invisible characters that make text look different from what it is.
+# Zero-width (non-)joiners stay allowed: emoji sequences and several scripts need them.
+_FORBIDDEN_CHARS = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ud800-\udfff"
+    r"؜​‎‏‪-‮⁠⁦-⁩﻿]"
+)
 
 
 def _no_control_chars(value: str | None) -> str | None:
-    if value is not None and _FORBIDDEN_CONTROL.search(value):
-        raise ValueError("control characters other than tab and newline are not allowed")
+    if value is not None and _FORBIDDEN_CHARS.search(value):
+        raise ValueError("control, bidi-override, invisible, and surrogate characters are not allowed")
     return value
 
 
@@ -118,9 +124,15 @@ class BoardHead(BaseModel):
     entry_hash: str
 
 
+RequestStatus = Literal["open", "answered", "closed"]
+
+
+RequestStatus = Literal["open", "answered", "closed"]
+
+
 class OperatorReplyIn(BaseModel):
     message: MessageText
-    status: Literal["open", "answered", "closed"] = "answered"
+    status: RequestStatus = "answered"
 
 
 class ReportDecisionIn(BaseModel):
