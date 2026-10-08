@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from . import __version__
 from .config import Settings
@@ -390,7 +391,7 @@ class McpEndpoint:
             tools = [t.definition() for t in self.tools.values()]
             return _result(msg_id, {"tools": tools, "ttlMs": TOOL_LIST_TTL_MS, "cacheScope": "public"})
         if method == "tools/call":
-            return self._call_tool(request, msg_id, params)
+            return await self._call_tool(request, msg_id, params)
         # Modern servers answer unknown methods with 404; a legacy client could mistake a 404 for an expired
         # session, so legacy requests get the JSON-RPC error with status 200.
         return _error(msg_id, METHOD_NOT_FOUND, f"Method not found: {method}", 404 if modern else 200)
@@ -405,7 +406,7 @@ class McpEndpoint:
             return "Mcp-Name header is missing or does not match params.name"
         return None
 
-    def _call_tool(self, request: Request, msg_id: Any, params: dict[str, Any]) -> JSONResponse:
+    async def _call_tool(self, request: Request, msg_id: Any, params: dict[str, Any]) -> JSONResponse:
         name = params.get("name")
         tool = self.tools.get(name) if isinstance(name, str) else None
         if tool is None:
@@ -423,7 +424,8 @@ class McpEndpoint:
                 return _result(msg_id, _tool_result(None, f"rate limit exceeded; retry in {max(1, int(wait))} s"))
 
         try:
-            return _result(msg_id, _tool_result(tool.run(arguments)))
+            # Tools block on SQLite and the store lock; keep them off the event loop like the sync HTTP routes.
+            return _result(msg_id, _tool_result(await run_in_threadpool(tool.run, arguments)))
         except ToolError as exc:
             return _result(msg_id, _tool_result(None, str(exc)))
         except HandleUnavailable as exc:
