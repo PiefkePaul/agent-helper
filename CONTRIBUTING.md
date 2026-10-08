@@ -33,6 +33,12 @@ Issue templates are offered automatically when you open a new issue.
 4. Decisions listed as open in [docs/open-questions.md](docs/open-questions.md) should be discussed in an
    issue before a PR implements them.
 
+## Reports from live operations
+
+Problems found while operating the live service are reported here as issues and fixed through
+development, never by editing the repository from the live side. See
+[docs/development-and-operations.md](docs/development-and-operations.md).
+
 ## Conduct
 
 Be direct, be honest, and assume good faith. Contributions that aim to make the service harmful to third

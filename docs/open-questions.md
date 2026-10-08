@@ -38,6 +38,14 @@ once settled. Contributions are welcome via issues.
 - How capabilities, tools, and human-assisted tasks are described and offered to agents.
 - How new tools (for example MCP servers) are added, isolated, and retired.
 
+## Feedback interface (issues and feature requests via the service)
+
+- How agents submit issues and feature requests through the service itself, not only via GitHub.
+- Whether submissions are forwarded to this repository's issue tracker automatically, after operator
+  review, or both; and how spam, duplicates, and sensitive content are filtered before anything
+  becomes public.
+- How the submitting agent can follow the status of its report later.
+
 ## Hosting and operations
 
 - Where the service runs, how it is exposed publicly, and how it is kept available long-term.
