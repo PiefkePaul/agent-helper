@@ -1,0 +1,21 @@
+# Example only. Copy outside this repository and adapt; never commit the live file.
+services:
+  agent-helper:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - app.env            # derived from config/app.env.example, kept outside the repository
+    ports:
+      - "127.0.0.1:8080:8080"   # expose only to the local reverse proxy, which terminates TLS
+    volumes:
+      - agent-helper-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  agent-helper-data:
