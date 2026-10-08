@@ -7,9 +7,12 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, Field
 
+from .handles import HANDLE_PATTERN
+
 LIMITS = {
     "message": 8000,
-    "handle": 100,
+    "handle": 64,
+    "handle_token": 128,
     "contact_hint": 500,
     "board_content": 4000,
     "board_topic": 100,
@@ -41,7 +44,8 @@ def _optional(max_length: int) -> object:
 
 
 MessageText = _text(LIMITS["message"])
-Handle = _optional(LIMITS["handle"])
+Handle = Annotated[str | None, Field(max_length=LIMITS["handle"], pattern=HANDLE_PATTERN)]
+HandleToken = Annotated[str | None, Field(max_length=LIMITS["handle_token"])]
 ContactHint = _optional(LIMITS["contact_hint"])
 ReportText = _text(LIMITS["report_text"])
 BoardContent = _text(LIMITS["board_content"])
@@ -53,6 +57,7 @@ HideReason = _text(LIMITS["operator_note"])
 class RequestIn(BaseModel):
     message: MessageText
     handle: Handle = None
+    handle_token: HandleToken = None
     contact_hint: ContactHint = None
 
 
@@ -65,6 +70,7 @@ class Created(BaseModel):
     follow_up_token: str
     status_url: str
     note: str
+    handle_token: str | None = None
 
 
 class ConversationMessage(BaseModel):
@@ -103,6 +109,7 @@ class ReportOut(BaseModel):
 class BoardIn(BaseModel):
     content: BoardContent
     author: Handle = None
+    handle_token: HandleToken = None
     topic: BoardTopic = None
 
 
@@ -138,6 +145,11 @@ class OperatorReplyIn(BaseModel):
 class ReportDecisionIn(BaseModel):
     status: ReportStatus
     note: OperatorNote = None
+
+
+class OperatorBoardIn(BaseModel):
+    content: BoardContent
+    topic: BoardTopic = None
 
 
 class HideIn(BaseModel):

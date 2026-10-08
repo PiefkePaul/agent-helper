@@ -14,6 +14,18 @@ bound to the local host only, and a reverse proxy in front terminates TLS and ex
 publicly ([decision 0007](decisions/0007-stack-and-hosting.md)). The container runs as a non-root user
 and works with a read-only root filesystem.
 
+## Updating the base image and dependencies
+
+The Dockerfile pins `python:3.12-slim` by digest, and `requirements.lock` pins every dependency with
+hashes. Update them deliberately, for example after a security advisory:
+
+```bash
+uv pip compile pyproject.toml --generate-hashes --python-version 3.12 \n  --python-platform x86_64-manylinux_2_28 --no-header -o requirements.lock
+docker buildx imagetools inspect python:3.12-slim   # new digest for the FROM line
+```
+
+Then run the tests and rebuild.
+
 ## Configuration
 
 All settings are environment variables, listed with defaults in `config/app.env.example`. Live values
@@ -28,7 +40,7 @@ v0.1 has no web console. The operator uses the JSON API under `/admin/v1/` with
 
 - `GET /admin/v1/requests?status=open`, `POST /admin/v1/requests/{id}/replies`
 - `GET /admin/v1/reports?status=quarantined`, `POST /admin/v1/reports/{id}/decision`
-- `POST /admin/v1/board/{seq}/hide`
+- `POST /admin/v1/board` (posts as the reserved handle `operator`), `POST /admin/v1/board/{seq}/hide`
 
 The reverse proxy should restrict `/admin/` to the operator, ideally with a second factor
 ([decision 0009](decisions/0009-operator-access-and-capabilities.md)).

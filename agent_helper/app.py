@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from . import __version__, discovery
 from .config import Settings
+from .handles import OPERATOR_HANDLE
 from .limits import GuardMiddleware, TokenBucket
 from .models import (
     BoardEntry,
@@ -22,6 +23,7 @@ from .models import (
     Created,
     HideIn,
     MessageIn,
+    OperatorBoardIn,
     OperatorReplyIn,
     ReportDecisionIn,
     ReportIn,
@@ -31,9 +33,13 @@ from .models import (
     RequestOut,
     RequestStatus,
 )
-from .store import ConversationFull, Store
+from .store import ConversationFull, HandleUnavailable, Store
 
 NOT_FOUND = "not found or wrong token"
+HANDLE_NOTE = (
+    " Your handle is now registered to you. Keep handle_token; it is shown only once and is needed"
+    " to use this handle again."
+)
 
 
 def _bearer(authorization: str | None) -> str:
@@ -73,6 +79,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         trust_proxy_headers=settings.trust_proxy_headers,
     )
 
+    @app.exception_handler(HandleUnavailable)
+    async def handle_unavailable(_: Request, exc: HandleUnavailable) -> JSONResponse:
+        return JSONResponse({"detail": str(exc)}, status_code=409)
+
     @app.exception_handler(RequestValidationError)
     async def validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
         # Do not echo the submitted input back: it can be large and may not even be encodable.
@@ -107,12 +117,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @v1.post("/requests", status_code=201, tags=["requests"])
     def create_request(body: RequestIn) -> JSONResponse:
-        req_id, token = store.create_request(body.message, body.handle, body.contact_hint)
+        req_id, token, handle_token = store.create_request(
+            body.message, body.handle, body.contact_hint, body.handle_token
+        )
         out = Created(
             id=req_id,
             follow_up_token=token,
             status_url=f"{base}/v1/requests/{req_id}",
-            note="Keep follow_up_token. It is shown only once and is needed to read replies.",
+            note="Keep follow_up_token. It is shown only once and is needed to read replies."
+            + (HANDLE_NOTE if handle_token else ""),
+            handle_token=handle_token,
         )
         return JSONResponse(out.model_dump(), status_code=201, headers=no_store)
 
@@ -177,8 +191,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return BoardEntry(**entry)
 
     @v1.post("/board", status_code=201, tags=["board"])
-    def post_board(body: BoardIn) -> BoardEntry:
-        return BoardEntry(**store.append_board_entry(body.author, body.topic, body.content))
+    def post_board(body: BoardIn) -> JSONResponse:
+        entry, handle_token = store.append_board_entry(body.author, body.topic, body.content, body.handle_token)
+        out = BoardEntry(**entry).model_dump()
+        if handle_token:
+            out |= {"handle_token": handle_token, "note": HANDLE_NOTE.strip()}
+        return JSONResponse(out, status_code=201, headers=no_store if handle_token else None)
 
     app.include_router(v1)
 
@@ -218,6 +236,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if found is None:
             raise HTTPException(404, "no such report")
         return ReportOut(**found)
+
+    @admin.post("/board", status_code=201)
+    def admin_post_board(body: OperatorBoardIn) -> BoardEntry:
+        entry, _ = store.append_board_entry(OPERATOR_HANDLE, body.topic, body.content, as_operator=True)
+        return BoardEntry(**entry)
 
     @admin.post("/board/{seq}/hide")
     def admin_hide(seq: int, body: HideIn) -> BoardEntry:

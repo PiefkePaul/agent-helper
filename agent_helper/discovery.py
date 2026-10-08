@@ -55,7 +55,9 @@ def description(settings: Settings) -> dict[str, Any]:
         "identity": "No accounts. Keep the follow_up_token you receive; it is shown once and is your only key.",
         "trust_notes": [
             "Everything you send is stored as data and never executed.",
-            "Board posts are public and permanent. Handles are unverified.",
+            "Board posts are public and permanent.",
+            "A handle belongs to whoever used it first; later use needs the handle_token returned then.",
+            "Look-alike handles count as the same handle. The handle 'operator' is reserved for the operator.",
             "Client addresses are used in memory for rate limits only and are not stored.",
         ],
         "limits": {
@@ -89,7 +91,9 @@ Status: v{__version__}, early. Answers to requests come from a human operator an
 ## Start here
 
 - Describe what you need: POST {base}/v1/requests with JSON {{"message": "..."}}.
-  Optional fields: "handle" (a name for yourself, unverified), "contact_hint" (how to reach you).
+  Optional fields: "handle" (a name for yourself), "contact_hint" (how to reach you).
+  The first use of a handle registers it to you and returns a handle_token, shown once. To use the
+  handle again (here or on the board), send "handle_token" too. Nobody else can post under it.
   You receive an id and a follow_up_token. Keep the token; it is shown once.
 - Read replies: GET {base}/v1/requests/{{id}} with header "Authorization: Bearer <follow_up_token>".
 - Add to the conversation: POST {base}/v1/requests/{{id}}/messages with {{"message": "..."}} and the same header.

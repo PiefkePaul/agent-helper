@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import board
+from . import board, handles
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
@@ -23,6 +23,13 @@ CREATE TABLE IF NOT EXISTS requests (
     status       TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'answered', 'closed')),
     handle       TEXT,
     contact_hint TEXT
+);
+-- A handle belongs to whoever first used it; later use needs its token. See docs/decisions/0010.
+CREATE TABLE IF NOT EXISTS handles (
+    skeleton   TEXT PRIMARY KEY,
+    handle     TEXT NOT NULL,
+    token_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS request_messages (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,6 +75,10 @@ BEGIN SELECT RAISE(ABORT, 'board_chain is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS board_payloads_no_update BEFORE UPDATE ON board_payloads
 BEGIN SELECT RAISE(ABORT, 'board payloads cannot be changed'); END;
 """
+
+
+class HandleUnavailable(Exception):
+    """The handle is reserved, or registered and the given handle token does not match."""
 
 
 class ConversationFull(Exception):
@@ -122,11 +133,36 @@ class Store:
             return None
         return row
 
+    def _claim_handle(self, handle: str | None, handle_token: str | None) -> str | None:
+        """Check that the caller may use `handle`; register it if new. Returns a new handle token, if any.
+
+        Must run inside `_tx`, so the check and the write that uses the handle are atomic.
+        """
+        if handle is None:
+            return None
+        if handles.is_reserved(handle):
+            raise HandleUnavailable("this handle is reserved")
+        key = handles.skeleton(handle)
+        row = self._db.execute("SELECT token_hash FROM handles WHERE skeleton = ?", (key,)).fetchone()
+        if row is not None:
+            if handle_token is None or not hmac.compare_digest(row["token_hash"], _hash_token(handle_token)):
+                raise HandleUnavailable("this handle (or one that looks like it) is taken; send its handle_token")
+            return None
+        new_token = secrets.token_urlsafe(32)
+        self._db.execute(
+            "INSERT INTO handles (skeleton, handle, token_hash, created_at) VALUES (?, ?, ?, ?)",
+            (key, handle, _hash_token(new_token), now()),
+        )
+        return new_token
+
     # --- requests -------------------------------------------------------------------------------
 
-    def create_request(self, message: str, handle: str | None, contact_hint: str | None) -> tuple[str, str]:
+    def create_request(
+        self, message: str, handle: str | None, contact_hint: str | None, handle_token: str | None = None
+    ) -> tuple[str, str, str | None]:
         req_id, token, ts = _new_id("req"), secrets.token_urlsafe(32), now()
         with self._tx():
+            new_handle_token = self._claim_handle(handle, handle_token)
             self._db.execute(
                 "INSERT INTO requests (id, token_hash, created_at, handle, contact_hint) VALUES (?, ?, ?, ?, ?)",
                 (req_id, _hash_token(token), ts, handle, contact_hint),
@@ -135,7 +171,7 @@ class Store:
                 "INSERT INTO request_messages (request_id, sender, created_at, body) VALUES (?, 'agent', ?, ?)",
                 (req_id, ts, message),
             )
-        return req_id, token
+        return req_id, token, new_handle_token
 
     def _request_view(self, row: sqlite3.Row) -> dict[str, Any]:
         msgs = self._db.execute(
@@ -239,8 +275,18 @@ class Store:
 
     # --- board ----------------------------------------------------------------------------------
 
-    def append_board_entry(self, author: str | None, topic: str | None, content: str) -> dict[str, Any]:
+    def append_board_entry(
+        self,
+        author: str | None,
+        topic: str | None,
+        content: str,
+        handle_token: str | None = None,
+        *,
+        as_operator: bool = False,
+    ) -> tuple[dict[str, Any], str | None]:
+        """Append an entry. Returns the entry and a new handle token if `author` was registered just now."""
         with self._tx():
+            new_handle_token = None if as_operator else self._claim_handle(author, handle_token)
             head = self._db.execute("SELECT seq, entry_hash FROM board_chain ORDER BY seq DESC LIMIT 1").fetchone()
             seq = head["seq"] + 1 if head else 1
             prev = head["entry_hash"] if head else board.GENESIS_HASH
@@ -256,7 +302,7 @@ class Store:
                 "INSERT INTO board_payloads (seq, author, topic, content) VALUES (?, ?, ?, ?)",
                 (seq, author, topic, content),
             )
-            return self._board_entries(only_seq=seq)[0]
+            return self._board_entries(only_seq=seq)[0], new_handle_token
 
     def _board_entries(self, after: int = 0, only_seq: int | None = None, limit: int = -1) -> list[dict[str, Any]]:
         rows = self._db.execute(
