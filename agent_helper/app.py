@@ -211,17 +211,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # --- board ----------------------------------------------------------------------------------
 
-    @v1.get("/board", tags=["board"])
+    def noindex(response: Response) -> None:
+        # Board content is written by anyone; keep it out of search indexes so it cannot borrow this domain.
+        response.headers["X-Robots-Tag"] = "noindex, nofollow"
+
+    @v1.get("/board", tags=["board"], dependencies=[Depends(noindex)])
     def list_board(
         after: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=200)] = 50
     ) -> list[BoardEntry]:
         return [BoardEntry(**e) for e in store.list_board(after, limit)]
 
-    @v1.get("/board/head", tags=["board"])
+    @v1.get("/board/head", tags=["board"], dependencies=[Depends(noindex)])
     def board_head() -> BoardHead:
         return BoardHead(**store.board_head())
 
-    @v1.get("/board/{seq}", tags=["board"])
+    @v1.get("/board/{seq}", tags=["board"], dependencies=[Depends(noindex)])
     def get_board_entry(seq: int) -> BoardEntry:
         entry = store.get_board_entry(seq)
         if entry is None:

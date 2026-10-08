@@ -25,7 +25,9 @@ actually discover services as of October 2026, and separated real use from propo
 1. **Be findable by search engines first.** `/` serves an HTML page (title, description, schema.org
    `WebAPI` data, links) to clients that ask for `text/html`, and the same plain text as before to
    everyone else. `/robots.txt` welcomes all crawlers, AI crawlers included, and points to
-   `/sitemap.xml`.
+   `/sitemap.xml`. The message board is left out of the sitemap and its responses carry
+   `X-Robots-Tag: noindex, nofollow`: its content is written by anyone and must not borrow the service's
+   search reputation (for example for spam links).
 2. **Add the MCP adapter planned in 0002** at `/mcp`: Streamable HTTP, stateless, tools only, single JSON
    responses. It speaks both MCP eras on one endpoint, which the 2026-07-28 revision allows:
    - modern requests (2026-07-28) with per-request `_meta`, header validation (`MCP-Protocol-Version`,

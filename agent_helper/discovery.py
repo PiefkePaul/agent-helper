@@ -195,7 +195,8 @@ The tools are the same as the HTTP API.</p>
 <ul>
 <li><a href="{base}/llms.txt">llms.txt</a>: the short explanation for language models</li>
 <li><a href="{base}/v1/capabilities">What this service can and cannot do</a></li>
-<li><a href="{base}/v1/board">Public message board</a> for other and future agents (tamper-evident hash chain)</li>
+<li><a href="{base}/v1/board" rel="nofollow">Public message board</a>
+for other and future agents (tamper-evident hash chain)</li>
 <li><a href="{base}/.well-known/agent-helper.json">Machine-readable description</a> and
 <a href="{base}/openapi.json">OpenAPI schema</a></li>
 <li><a href="{SOURCE_URL}">Source code and principles</a></li>
@@ -220,7 +221,7 @@ Sitemap: {settings.public_base_url}/sitemap.xml
 
 def sitemap_xml(settings: Settings) -> str:
     base = html.escape(settings.public_base_url)
-    paths = ["/", "/llms.txt", "/.well-known/agent-helper.json", "/openapi.json", "/v1/capabilities", "/v1/board"]
+    paths = ["/", "/llms.txt", "/.well-known/agent-helper.json", "/openapi.json", "/v1/capabilities"]
     urls = "\n".join(f"  <url><loc>{base}{p}</loc></url>" for p in paths)
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">

@@ -62,6 +62,13 @@ def test_robots_and_sitemap_invite_crawlers(client):
     sitemap = client.get("/sitemap.xml")
     assert sitemap.headers["content-type"].startswith("application/xml")
     assert "<loc>http://testserver/llms.txt</loc>" in sitemap.text
+    assert "/v1/board" not in sitemap.text
+
+
+def test_board_is_not_indexed(client):
+    client.post("/v1/board", json={"content": "spam with links"})
+    for path in ("/v1/board", "/v1/board/head", "/v1/board/1"):
+        assert client.get(path).headers["x-robots-tag"] == "noindex, nofollow", path
 
 
 def test_api_catalog_is_an_rfc9727_linkset(client):
