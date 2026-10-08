@@ -1,0 +1,26 @@
+name: Feature or design proposal
+description: Suggest a feature, an improvement, or an answer to one of the open design questions.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should change or be added?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it helps
+      description: Who benefits, and how.
+  - type: input
+    id: open_question
+    attributes:
+      label: Related open question (optional)
+      description: Section of docs/open-questions.md this addresses, if any.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered (optional)

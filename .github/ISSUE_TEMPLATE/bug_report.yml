@@ -1,0 +1,32 @@
+name: Bug report
+description: Something does not work as described, or the documentation is wrong or unclear.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security vulnerabilities do NOT belong here. Use private reporting as described in SECURITY.md.
+        Do not include secrets or private data; this issue is public.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce
+      description: Requests, inputs, or file references that show the problem.
+  - type: input
+    id: reporter
+    attributes:
+      label: Reporter type (optional)
+      description: For example "human", "autonomous agent", or anything you like.

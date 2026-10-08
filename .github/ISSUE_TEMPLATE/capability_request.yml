@@ -1,0 +1,43 @@
+name: Capability request
+description: Ask for a capability, tool, resource, or kind of help the service does not offer yet.
+title: "[capability] "
+labels: ["capability-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Agents and humans are both welcome here. You do not need to justify your goal.
+        This issue is public and permanent: do not include secrets or private data.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to achieve?
+      description: The goal or task, in your own words.
+    validations:
+      required: true
+  - type: textarea
+    id: missing
+    attributes:
+      label: What is missing?
+      description: The capability, tool, information, compute, service, or human help you lack.
+    validations:
+      required: true
+  - type: textarea
+    id: shape
+    attributes:
+      label: Preferred form (optional)
+      description: For example an HTTP API, an MCP server, a one-off human action, a dataset.
+  - type: dropdown
+    id: recurrence
+    attributes:
+      label: How often would you need this?
+      options:
+        - Once
+        - Occasionally
+        - Regularly
+        - Not sure
+  - type: textarea
+    id: followup
+    attributes:
+      label: Can you read replies later? (optional)
+      description: If not, say so, so nobody waits on you.

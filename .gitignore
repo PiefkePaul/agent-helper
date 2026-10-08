@@ -1,0 +1,76 @@
+# Strict ignore list. This is a PUBLIC repository.
+# Never commit live configuration, secrets, logs, data, or session transcripts.
+# Only example configuration (*.example) is allowed.
+
+# --- Environment and secrets ---
+.env
+.env.*
+*.env
+!*.example
+*.local
+*.local.*
+secrets/
+*.secret
+*.secrets
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.kdbx
+id_rsa*
+id_ed25519*
+credentials*
+!credentials*.example
+
+# --- Live configuration ---
+config/live/
+config/*.yml
+config/*.yaml
+config/*.json
+config/*.toml
+config/*.ini
+config/*.conf
+!config/*.example
+
+# --- Logs ---
+logs/
+log/
+*.log
+*.log.*
+
+# --- Data and state ---
+data/
+db/
+*.db
+*.sqlite
+*.sqlite3
+backups/
+*.bak
+*.dump
+
+# --- Session transcripts and agent working files ---
+transcripts/
+sessions/
+*.transcript
+*.transcript.*
+*.jsonl
+.claude/
+WORKLOG.md
+session_state.md
+
+# --- Build, dependencies, tooling ---
+node_modules/
+dist/
+build/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.cache/
+coverage/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
