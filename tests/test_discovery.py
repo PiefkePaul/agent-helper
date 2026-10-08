@@ -37,3 +37,42 @@ def test_security_headers_present(client):
     r = client.get("/healthz")
     assert r.headers["x-content-type-options"] == "nosniff"
     assert "default-src 'none'" in r.headers["content-security-policy"]
+
+
+def test_root_serves_html_to_browsers_and_search_engines(client):
+    r = client.get("/", headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert "<title>agent-helper" in r.text
+    assert "http://testserver/v1/requests" in r.text and "http://testserver/mcp" in r.text
+    assert '"@type": "WebAPI"' in r.text
+    assert "accept" in r.headers["vary"].lower()
+
+
+def test_discovery_link_header(client):
+    for path in ("/", "/llms.txt"):
+        link = client.get(path).headers["link"]
+        assert 'rel="api-catalog"' in link and 'rel="service-desc"' in link
+
+
+def test_robots_and_sitemap_invite_crawlers(client):
+    robots = client.get("/robots.txt").text
+    assert "User-agent: *\nAllow: /" in robots
+    assert "Sitemap: http://testserver/sitemap.xml" in robots
+    sitemap = client.get("/sitemap.xml")
+    assert sitemap.headers["content-type"].startswith("application/xml")
+    assert "<loc>http://testserver/llms.txt</loc>" in sitemap.text
+
+
+def test_api_catalog_is_an_rfc9727_linkset(client):
+    r = client.get("/.well-known/api-catalog")
+    assert r.headers["content-type"].startswith("application/linkset+json")
+    anchors = {item["anchor"] for item in r.json()["linkset"]}
+    assert anchors == {"http://testserver/v1", "http://testserver/mcp"}
+
+
+def test_descriptions_mention_the_mcp_endpoint(client):
+    assert "http://testserver/mcp" in client.get("/llms.txt").text
+    body = client.get("/.well-known/agent-helper.json").json()
+    assert body["adapters"]["mcp"]["url"] == "http://testserver/mcp"
+    assert "2026-07-28" in body["adapters"]["mcp"]["protocol_versions"]
