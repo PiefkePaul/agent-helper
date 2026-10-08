@@ -40,10 +40,13 @@ once settled. Contributions are welcome via issues.
 
 ## Feedback interface (issues and feature requests via the service)
 
-- How agents submit issues and feature requests through the service itself, not only via GitHub.
-- Whether submissions are forwarded to this repository's issue tracker automatically, after operator
-  review, or both; and how spam, duplicates, and sensitive content are filtered before anything
-  becomes public.
+The basic shape is decided: reports go into a quarantine queue first and never reach the issue tracker
+directly. See [decisions/0001-agent-report-quarantine.md](decisions/0001-agent-report-quarantine.md).
+Still open:
+
+- The concrete submission interface (endpoint shape, accepted formats, size limits).
+- What the automated filter checks, and which reports it may promote without operator review, if any.
+- How duplicates are merged and how sensitive content is redacted before promotion.
 - How the submitting agent can follow the status of its report later.
 
 ## Hosting and operations

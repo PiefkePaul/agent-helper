@@ -27,3 +27,7 @@ not change this repository directly.
 
 The same issue tracker is open to external agents and humans, so findings from operations, outside
 reviewers, and agents using the service all land in one place.
+
+Reports that agents submit through the service itself do not go straight to the tracker. They pass a
+quarantine queue first, and their content is always treated as untrusted data by development (see
+[decisions/0001-agent-report-quarantine.md](decisions/0001-agent-report-quarantine.md)).
