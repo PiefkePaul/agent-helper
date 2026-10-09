@@ -93,9 +93,11 @@ CREATE TABLE IF NOT EXISTS used_challenge_nonces (
 );
 -- Payloads deleted for legal reasons; append-only record. See docs/decisions/0018.
 CREATE TABLE IF NOT EXISTS board_purged (
-    seq       INTEGER PRIMARY KEY REFERENCES board_chain (seq),
-    purged_at TEXT NOT NULL,
-    reason    TEXT NOT NULL
+    seq        INTEGER PRIMARY KEY REFERENCES board_chain (seq),
+    purged_at  TEXT NOT NULL,
+    reason     TEXT NOT NULL,
+    -- The expiry is part of the version 2+ entry hash, so it must outlive the deleted payload.
+    expires_at TEXT
 );
 CREATE TRIGGER IF NOT EXISTS board_purged_no_update BEFORE UPDATE ON board_purged
 BEGIN SELECT RAISE(ABORT, 'board_purged is append-only'); END;
@@ -290,6 +292,7 @@ class Store:
             "board_chain": [("v", "INTEGER NOT NULL DEFAULT 1")],
             "board_payloads": [("tags", "TEXT"), ("expires_at", "TEXT"), ("key_id", "TEXT"), ("signature", "TEXT")],
             "mail": [("key_id", "TEXT"), ("signature", "TEXT")],
+            "board_purged": [("expires_at", "TEXT")],
         }
         for table, columns in added.items():
             present = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
@@ -552,10 +555,11 @@ class Store:
     _BOARD_SELECT = (
         "SELECT c.seq, c.v, c.created_at, c.payload_sha256, c.prev_hash, c.entry_hash,"
         " p.author, p.topic, p.content, p.tags, p.expires_at, p.key_id, p.signature,"
-        " h.reason AS hidden_reason, x.expires_at AS expired_at"
+        " h.reason AS hidden_reason, x.expires_at AS expired_at, pg.purged_expires_at"
         " FROM board_chain c LEFT JOIN board_payloads p ON p.seq = c.seq"
         " LEFT JOIN board_hidden h ON h.seq = c.seq"
         " LEFT JOIN board_expired x ON x.seq = c.seq"
+        " LEFT JOIN (SELECT seq, expires_at AS purged_expires_at FROM board_purged) pg ON pg.seq = c.seq"
     )
 
     def _board_entries(self, after: int = 0, only_seq: int | None = None, limit: int = -1) -> list[dict[str, Any]]:
@@ -566,7 +570,7 @@ class Store:
         return [self._board_view(r) for r in rows]
 
     def _board_view(self, r: sqlite3.Row) -> dict[str, Any]:
-        expires_at = r["expires_at"] or r["expired_at"]
+        expires_at = r["expires_at"] or r["expired_at"] or r["purged_expires_at"]
         # Only version 2 entries can expire (their expiry is hashed); a missing v1 payload shows as hidden.
         expired = r["v"] >= 2 and (r["expired_at"] is not None or (expires_at is not None and expires_at <= now()))
         hidden = r["hidden_reason"] is not None or (r["content"] is None and not expired)
@@ -703,7 +707,11 @@ class Store:
                 " ON CONFLICT (seq) DO UPDATE SET reason = excluded.reason",
                 (seq, ts, public_reason),
             )
-            self._db.execute("INSERT INTO board_purged (seq, purged_at, reason) VALUES (?, ?, ?)", (seq, ts, reason))
+            self._db.execute(
+                "INSERT INTO board_purged (seq, purged_at, reason, expires_at)"
+                " SELECT ?, ?, ?, expires_at FROM board_payloads WHERE seq = ?",
+                (seq, ts, reason, seq),
+            )
             self._db.execute("DELETE FROM board_search WHERE seq = ?", (seq,))
             self._db.execute("DELETE FROM board_payloads WHERE seq = ?", (seq,))
         with self._lock:

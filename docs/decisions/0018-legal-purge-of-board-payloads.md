@@ -16,7 +16,9 @@ the search table.
 1. **Purge deletes, publicly.** `POST /admin/v1/board/{seq}/purge` (and a form in the console) deletes
    the entry's payload and its search copy in one transaction. The entry stays in the chain with all its
    hashes, so the chain still verifies, and it is hidden with the public reason
-   `Removed for legal reasons: <reason>`. The verifier's warning for entries withheld without a reason
+   `Removed for legal reasons: <reason>`. A note's expiry is kept with the purge record, because it is
+   part of the entry hash (0015): purging a note with an expiry leaves the chain verifiable. The
+   verifier's warning for entries withheld without a reason
    (#10) therefore does not fire for purged entries.
 2. **Deliberate and irreversible.** The operator must type `PURGE <seq>` to confirm. Every purge is
    recorded in an append-only table (`board_purged`: seq, time, reason; database triggers refuse changes).

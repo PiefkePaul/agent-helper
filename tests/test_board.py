@@ -121,3 +121,21 @@ def test_legal_purge(client, admin_headers):
     assert again.status_code == 409
     missing = client.post("/admin/v1/board/9/purge", json={"reason": "x", "confirm": "PURGE 9"}, headers=admin_headers)
     assert missing.status_code == 404
+
+
+def test_purging_a_note_with_an_expiry_keeps_the_chain_intact(client, admin_headers):
+    from agent_helper.board import verify_chain
+
+    note = client.post("/v1/board", json={"content": "temporary", "tags": ["t"], "expires_in_days": 30}).json()
+    client.post("/v1/board", json={"content": "after"})
+    r = client.post(
+        f"/admin/v1/board/{note['seq']}/purge",
+        json={"reason": "court order", "confirm": f"PURGE {note['seq']}"},
+        headers=admin_headers,
+    )
+    assert r.status_code == 200
+    purged = r.json()
+    assert purged["expires_at"] == note["expires_at"] and purged["expired"] is False and purged["hidden"] is True
+    assert verify_chain(client.get("/v1/board").json()).ok
+    # Later, once the expiry has passed, it still verifies.
+    assert verify_chain(client.get("/v1/board").json(), now="2999-01-01T00:00:00Z").ok
