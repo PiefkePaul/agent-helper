@@ -12,10 +12,12 @@ WEBHOOK = "https://hooks.example.invalid/agent-helper"
 class Recorder:
     def __init__(self, results: list[Delivery] | None = None) -> None:
         self.calls: list[tuple[str, dict, dict[str, str]]] = []
+        self.raw: list[bytes] = []
         self.results = results or []
 
     def __call__(self, url: str, body: bytes, headers: dict[str, str]) -> Delivery:
         self.calls.append((url, json.loads(body), headers))
+        self.raw.append(body)
         return self.results.pop(0) if self.results else Delivery(ok=True, status=200)
 
     @property
@@ -54,7 +56,8 @@ def test_new_request_and_follow_up_notify_without_content(notified):
     assert first["event"] == "request.created"
     assert first["id"] == created["id"]
     assert first["handle"] == "nova"
-    assert first["admin_url"] == f"http://testserver/admin/v1/requests/{created['id']}"
+    assert first["admin_api_url"] == f"http://testserver/admin/v1/requests/{created['id']}"
+    assert first["event_id"] != second["event_id"]
     assert "nova" in first["text"]
     assert second["event"] == "request.message"
     # Agent text never leaves the service unless the operator opts in.
@@ -116,10 +119,11 @@ def test_signature_header(notified):
     client, notifier, rec = notified(notify_webhook_secret="s3cret")  # noqa: S106
     client.post("/v1/requests", json={"message": "hi"})
     assert notifier.flush()
-    _, payload, headers = rec.calls[0]
+    _, _, headers = rec.calls[0]
     assert headers["X-Agent-Helper-Event"] == "request.created"
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    assert headers["X-Agent-Helper-Signature"] == sign("s3cret", headers["X-Agent-Helper-Timestamp"], body)
+    # The signature covers the exact bytes that were sent.
+    expected = sign("s3cret", headers["X-Agent-Helper-Timestamp"], rec.raw[0])
+    assert headers["X-Agent-Helper-Signature"] == expected
 
 
 def test_failed_delivery_never_breaks_the_request(notified):
@@ -145,18 +149,90 @@ def test_retries_on_server_error_but_not_on_client_error():
     assert len(rec.calls) == 1
 
 
-def test_flood_is_capped_and_counted():
+def test_flood_is_capped_and_reported_in_a_digest():
     rec = Recorder()
-    n = Notifier(WEBHOOK, base_url="http://x", transport=rec, max_per_minute=3)
+    n = Notifier(WEBHOOK, base_url="http://x", transport=rec, max_per_minute=3, digest_interval=0.0)
     for i in range(10):
         n.emit("request.created", id=f"req_{i}", handle=None)
     assert n.flush()
-    assert len(rec.calls) == 3
-    n._budget = type(n._budget)(per_minute=3)  # a minute later
-    n.emit("request.created", id="req_late", handle=None)
-    assert n.flush()
-    assert rec.events[-1]["suppressed_before"] == 7
+    individual = [e for e in rec.events if e["event"] == "request.created"]
+    digests = [e for e in rec.events if e["event"] == "digest"]
+    assert len(individual) == 3
+    assert sum(d["missed"] for d in digests) == 7
+    assert digests[0]["open_requests_api_url"] == "http://x/admin/v1/requests?status=open"
+    assert n.missed == 0
     n.close()
+
+
+def test_digest_is_rate_limited_and_survives_a_flood():
+    rec = Recorder()
+    n = Notifier(WEBHOOK, base_url="http://x", transport=rec, max_per_minute=1, digest_interval=3600.0)
+    for i in range(50):
+        n.emit("request.created", id=f"req_{i}", handle=None)
+    assert n.flush()
+    # One event goes out; the digest waits for its interval however many events come in.
+    assert [e["event"] for e in rec.events] == ["request.created"]
+    assert n.missed == 49
+    n.close()
+
+
+def test_stale_and_failed_events_count_as_missed():
+    rec = Recorder([Delivery(ok=False, status=404)])
+    n = Notifier(WEBHOOK, base_url="http://x", transport=rec, max_age=-1.0, digest_interval=3600.0)
+    n.emit("request.created", id="req_old", handle=None)
+    assert n.flush()
+    assert rec.events == [] and n.missed == 1
+
+    n = Notifier(WEBHOOK, base_url="http://x", transport=rec, digest_interval=3600.0)
+    n.emit("request.created", id="req_404", handle=None)
+    assert n.flush()
+    assert n.missed == 1
+    n.close()
+
+
+def test_full_queue_counts_as_missed(monkeypatch):
+    import agent_helper.notify as notify
+
+    monkeypatch.setattr(notify, "QUEUE_SIZE", 1)
+    gate = threading.Event()
+
+    def slow(url, body, headers):
+        gate.wait(5)
+        return Delivery(ok=True, status=200)
+
+    n = Notifier(WEBHOOK, base_url="http://x", transport=slow, digest_interval=3600.0)
+    for i in range(5):
+        n.emit("request.created", id=f"req_{i}", handle=None)
+    assert n.missed >= 3  # one in flight, one queued, the rest dropped
+    gate.set()
+    assert n.flush()
+    n.close()
+
+
+def test_slow_webhook_does_not_slow_the_agent(notified):
+    import time
+
+    client, notifier, _ = notified()
+    gate = threading.Event()
+
+    def slow(url, body, headers):
+        gate.wait(5)
+        return Delivery(ok=True, status=200)
+
+    notifier.transport = slow
+    started = time.monotonic()
+    for _ in range(3):
+        assert client.post("/v1/requests", json={"message": "hi"}).status_code == 201
+    assert time.monotonic() - started < 2
+    gate.set()
+    assert notifier.flush()
+
+
+def test_close_stops_the_worker():
+    n = Notifier(WEBHOOK, base_url="http://x", transport=Recorder())
+    n.emit("request.created", id="req_1", handle=None)
+    n.close()
+    assert n._thread is not None and not n._thread.is_alive()
 
 
 def test_admin_can_read_one_request_and_send_a_test(notified, admin_headers):

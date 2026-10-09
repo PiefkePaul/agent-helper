@@ -5,7 +5,7 @@ from the configuration (for example an n8n workflow that forwards to a chat app)
 background thread, so a slow or broken webhook never delays or fails the agent's request.
 
 Events carry metadata only by default. Agent text is untrusted; it is included, truncated and labelled,
-only when the operator turns on `NOTIFY_INCLUDE_PREVIEW`.
+only when the operator turns on `NOTIFY_INCLUDE_PREVIEW`. The handle, also chosen by the agent, is quoted.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import hmac
 import json
 import logging
 import queue
+import secrets
 import threading
 import time
 import urllib.error
@@ -31,8 +32,10 @@ log = logging.getLogger("agent_helper.notify")
 
 PREVIEW_CHARS = 280
 QUEUE_SIZE = 1000
-TIMEOUT_SECONDS = 10.0
-RETRY_DELAYS = (2.0, 10.0)  # seconds before the second and third attempt
+TIMEOUT_SECONDS = 5.0
+RETRY_DELAYS = (2.0, 5.0)  # seconds before the second and third attempt
+MAX_AGE_SECONDS = 600.0  # older queued events are counted as missed instead of sent late
+DIGEST_INTERVAL_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -74,7 +77,8 @@ def sign(secret: str, timestamp: str, body: bytes) -> str:
 
 
 def _summary(event: str, fields: dict[str, Any]) -> str:
-    who = f" from {fields['handle']}" if fields.get("handle") else ""
+    # The handle is chosen by the agent: quote it so it reads as a name, not as the service speaking.
+    who = f' from handle "{fields["handle"]}"' if fields.get("handle") else ""
     match event:
         case "request.created":
             return f"New request {fields['id']}{who}"
@@ -88,8 +92,18 @@ def _summary(event: str, fields: dict[str, Any]) -> str:
             return event
 
 
+def _utc_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
 class Notifier:
-    """Sends events to the configured webhook. A no-op when no webhook is configured."""
+    """Sends events to the configured webhook. A no-op when no webhook is configured.
+
+    Flood handling: at most `max_per_minute` events are queued. Events over that cap, events that waited in
+    the queue longer than `max_age` seconds (for example while the webhook was down), and events lost to a
+    full queue or a failed delivery are counted. The count is sent as a `digest` event at most once per
+    `digest_interval` seconds, so the operator always learns that something was missed.
+    """
 
     def __init__(
         self,
@@ -102,6 +116,8 @@ class Notifier:
         max_per_minute: int = 30,
         transport: Transport = http_transport,
         retry_delays: tuple[float, ...] = RETRY_DELAYS,
+        max_age: float = MAX_AGE_SECONDS,
+        digest_interval: float = DIGEST_INTERVAL_SECONDS,
     ) -> None:
         self.url = url
         self.base_url = base_url
@@ -110,10 +126,13 @@ class Notifier:
         self.include_preview = include_preview
         self.transport = transport
         self.retry_delays = retry_delays
+        self.max_age = max_age
+        self.digest_interval = digest_interval
         self._budget = TokenBucket(max_per_minute)
-        self._suppressed = 0
-        self._suppressed_lock = threading.Lock()
-        self._queue: queue.Queue[bytes | None] = queue.Queue(maxsize=QUEUE_SIZE)
+        self._missed = 0
+        self._missed_lock = threading.Lock()
+        self._last_digest = time.monotonic()
+        self._queue: queue.Queue[tuple[float, bytes] | None] = queue.Queue(maxsize=QUEUE_SIZE)
         self._thread: threading.Thread | None = None
         self._thread_lock = threading.Lock()
 
@@ -132,6 +151,11 @@ class Notifier:
     def enabled(self) -> bool:
         return self.url is not None
 
+    @property
+    def missed(self) -> int:
+        with self._missed_lock:
+            return self._missed
+
     # --- producing events -----------------------------------------------------------------------
 
     def emit(self, event: str, **fields: Any) -> None:
@@ -139,41 +163,55 @@ class Notifier:
         if not self.enabled or event not in self.events:
             return
         try:
-            if self._budget.take("notify") > 0:
-                self._count_suppressed()
-                return
-            body = self._payload(event, fields)
             self._start()
-            self._queue.put_nowait(body)
+            if self._budget.take("notify") > 0:
+                self._miss()
+                return
+            self._queue.put_nowait((time.monotonic(), self._payload(event, fields)))
         except queue.Full:
-            self._count_suppressed()
+            self._miss()
         except Exception:
             log.exception("could not queue notification")
+            self._miss()
 
-    def _count_suppressed(self) -> None:
-        with self._suppressed_lock:
-            self._suppressed += 1
+    def _miss(self, count: int = 1) -> None:
+        with self._missed_lock:
+            self._missed += count
+
+    def _envelope(self, event: str, text: str) -> dict[str, Any]:
+        return {
+            "event": event,
+            "event_id": secrets.token_hex(8),
+            "service": self.base_url,
+            "created_at": _utc_now(),
+            "text": text,
+        }
 
     def _payload(self, event: str, fields: dict[str, Any]) -> bytes:
         preview = fields.pop("preview", None)
-        with self._suppressed_lock:
-            suppressed, self._suppressed = self._suppressed, 0
-        data: dict[str, Any] = {
-            "event": event,
-            "service": self.base_url,
-            "sent_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "text": _summary(event, fields),
-            **fields,
-            "suppressed_before": suppressed,
-        }
+        data = self._envelope(event, _summary(event, fields)) | fields
+        # API locations, not clickable pages: they need the admin bearer secret.
         if "id" in fields and event.startswith("request."):
-            data["admin_url"] = f"{self.base_url}/admin/v1/requests/{fields['id']}"
+            data["admin_api_url"] = f"{self.base_url}/admin/v1/requests/{fields['id']}"
         elif "id" in fields and event.startswith("report."):
-            data["admin_url"] = f"{self.base_url}/admin/v1/reports?status=quarantined"
+            data["admin_api_url"] = f"{self.base_url}/admin/v1/reports?status=quarantined"
         if self.include_preview and preview:
             cut = preview[:PREVIEW_CHARS] + ("…" if len(preview) > PREVIEW_CHARS else "")
             data["untrusted_preview"] = cut
         return json.dumps(data, ensure_ascii=False).encode("utf-8")
+
+    def _digest(self, missed: int) -> bytes:
+        data = self._envelope(
+            "digest",
+            f"{missed} notification(s) were not sent individually (rate cap, delay, or delivery failure). "
+            "Check the open requests and quarantined reports.",
+        )
+        data |= {
+            "missed": missed,
+            "open_requests_api_url": f"{self.base_url}/admin/v1/requests?status=open",
+            "quarantined_reports_api_url": f"{self.base_url}/admin/v1/reports?status=quarantined",
+        }
+        return json.dumps(data).encode("utf-8")
 
     # --- delivering -----------------------------------------------------------------------------
 
@@ -197,7 +235,7 @@ class Notifier:
             if attempt:
                 time.sleep(self.retry_delays[attempt - 1])
             try:
-                result = self.transport(self.url or "", body, self._headers(body, event))  # type: ignore[arg-type]
+                result = self.transport(self.url or "", body, self._headers(body, event))
             except Exception as exc:  # a transport bug must not kill the worker
                 result = Delivery(ok=False, error=type(exc).__name__)
             if result.ok or not result.retry:
@@ -210,14 +248,7 @@ class Notifier:
         """Send a test event synchronously so the operator can check the webhook setup."""
         if not self.enabled:
             return Delivery(ok=False, error="no webhook configured (NOTIFY_WEBHOOK_URL)")
-        body = json.dumps(
-            {
-                "event": "test",
-                "service": self.base_url,
-                "sent_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "text": "Test notification from agent-helper",
-            }
-        ).encode()
+        body = json.dumps(self._envelope("test", "Test notification from agent-helper")).encode()
         return self.send_now(body, retry=False)
 
     def _start(self) -> None:
@@ -228,13 +259,33 @@ class Notifier:
 
     def _run(self) -> None:
         while True:
-            body = self._queue.get()
             try:
-                if body is None:
+                item = self._queue.get(timeout=min(self.digest_interval, 60.0))
+            except queue.Empty:
+                self._maybe_send_digest()
+                continue
+            try:
+                if item is None:
                     return
-                self.send_now(body)
+                queued_at, body = item
+                if time.monotonic() - queued_at > self.max_age:
+                    self._miss()  # stale news; the digest says something was missed instead
+                elif not self.send_now(body).ok:
+                    self._miss()
+                self._maybe_send_digest()
             finally:
                 self._queue.task_done()
+
+    def _maybe_send_digest(self) -> None:
+        if time.monotonic() - self._last_digest < self.digest_interval:
+            return
+        with self._missed_lock:
+            missed, self._missed = self._missed, 0
+        if not missed:
+            return
+        self._last_digest = time.monotonic()
+        if not self.send_now(self._digest(missed)).ok:
+            self._miss(missed)
 
     def flush(self, timeout: float = 5.0) -> bool:
         """Wait until queued events are handled. Returns False on timeout. Meant for tests and shutdown."""
@@ -246,6 +297,7 @@ class Notifier:
         return True
 
     def close(self, timeout: float = 5.0) -> None:
+        """Stop the worker. Events still queued or in retry after `timeout` are lost (the database is not)."""
         if self._thread is not None and self._thread.is_alive():
             self.flush(timeout)
             try:
