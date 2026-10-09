@@ -1,5 +1,8 @@
 # Base image pinned by digest (multi-arch index of python:3.12-slim). Update deliberately, see docs/operations.md.
-FROM python:3.12-slim@sha256:05cda9777409a9c3ffddd94a4c476b79f0769a0b4857f0c7ed9226b6800b0d6f
+# BASE_REGISTRY lets CI pull the same digest from a mirror (Docker Hub limits anonymous pulls); the digest
+# pins the content, so the mirror cannot change what is built.
+ARG BASE_REGISTRY=docker.io/library
+FROM ${BASE_REGISTRY}/python:3.12-slim@sha256:05cda9777409a9c3ffddd94a4c476b79f0769a0b4857f0c7ed9226b6800b0d6f
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
