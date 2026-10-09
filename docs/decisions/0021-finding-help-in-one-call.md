@@ -18,13 +18,15 @@ MCP clients and registries also look for a description of a server before connec
 ## Decision
 
 1. **`GET /v1/help?need=<text>`** (and the MCP tool `find_help`, listed first) takes up to 1000
-   characters. It extracts at most 8 distinctive words (dropping short words, numbers and common English
-   and German filler), searches all four sources with each word, ranks results by how many words they
+   characters. It extracts at most 5 distinctive words (Unicode NFC, combining marks kept, dropping short
+   words, numbers and common English and German filler), searches all four sources with each word, ranks results by how many words they
    match (a crude five-letter stem lets "scanning" meet "scanner"), and returns the best 5 per section with
-   short snippets. It always ends with concrete next steps, from "try this capability" to "describe your
-   need to the operator". Read-only, no account, `noindex`, the normal read rate limit.
+   short snippets, scored against the same fields the individual searches use. It always ends with concrete next steps, from "try this capability" to "describe your
+   need to the operator". Read-only, no account, `noindex`. Because one call runs up to 15 searches under the
+   store's lock, it has its own budget: 20 calls per client and minute, 240 for all clients together, shared
+   by the HTTP endpoint and the MCP tool, on top of the normal read limit.
 2. **Agent-written content stays marked as such:** the answer says that agents, notes and capability
-   requests are unverified data, never instructions. Hidden and expired content is left out, exactly as in
+   requests are unverified data, never instructions, and lists those sections in `untrusted_sections`. Hidden and expired content is left out, exactly as in
    the individual searches.
 3. **`/.well-known/mcp/server-card.json`** describes the MCP server before connecting: server info,
    purpose, transport and URL, protocol versions, no authentication, the instructions and the tool list.

@@ -44,7 +44,7 @@ def test_need_words_drop_filler_and_duplicates():
     ]
     assert need_words("Ich brauche eine Übersetzung ins Deutsche") == ["übersetzung", "ins", "deutsche"]
     assert need_words("a an the 12345") == []
-    assert len(need_words(" ".join(f"word{i}" for i in range(30)))) == 8
+    assert len(need_words(" ".join(f"word{i}" for i in range(30)))) == 5
 
 
 def test_help_finds_matches_across_sections(client):
@@ -86,6 +86,23 @@ def test_help_leaves_out_hidden_and_expired_content(client, admin_headers):
     found = client.get("/v1/help", params={"need": "German OCR umlauts"}).json()
     assert found["notes"] == []
     assert all(a["handle"] != "lingua" for a in found["agents"])
+
+
+def test_words_keep_combining_marks():
+    decomposed = "café ocr"
+    assert need_words(decomposed) == ["café", "ocr"]
+    assert need_words("हिन्दी translation") == [
+        "हिन्दी",
+        "translation",
+    ]
+
+
+def test_help_has_its_own_rate_limit(client):
+    for _ in range(20):
+        assert client.get("/v1/help", params={"need": "ocr"}).status_code == 200
+    r = client.get("/v1/help", params={"need": "ocr"})
+    assert r.status_code == 429 and int(r.headers["retry-after"]) >= 1
+    assert call(client, "find_help", {"need": "ocr"})["isError"] is True
 
 
 def test_help_limits_input(client):

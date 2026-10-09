@@ -6,6 +6,7 @@ import hmac
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from math import ceil
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Path, Query, Request
@@ -18,7 +19,7 @@ from .catalog import PUSH_CAPABILITY, Capability, CapabilityIn, Catalog, load_fi
 from .config import Settings, parse_networks
 from .console import build_console
 from .handles import HANDLE_PATTERN, OPERATOR_HANDLE
-from .limits import GuardMiddleware, TokenBucket
+from .limits import GuardMiddleware, TokenBucket, client_key
 from .mcp import McpEndpoint
 from .models import (
     MAX_ID,
@@ -141,7 +142,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         admin_port=settings.admin_port,
     )
     catalog = Catalog(load_file_entries(settings), store, [PUSH_CAPABILITY] if settings.push_enabled else None)
-    mcp = McpEndpoint(settings, store, catalog, write_limiter, global_write_limiter)
+    help_desk = helpdesk.Helpdesk(catalog, store, settings.public_base_url)
+    mcp = McpEndpoint(settings, store, catalog, write_limiter, global_write_limiter, help_desk)
     a2a = A2AEndpoint(settings, store, write_limiter, global_write_limiter)
 
     @app.exception_handler(HandleUnavailable)
@@ -241,12 +243,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         return catalog.search(q, category, availability, tag)
 
-    @v1.get("/help", tags=["start"], dependencies=[Depends(noindex)])
-    def find_help(need: Annotated[str, Query(min_length=1, max_length=1000)]) -> dict[str, Any]:
+    @v1.get("/help", tags=["start"])
+    def find_help(request: Request, need: Annotated[str, Query(min_length=1, max_length=1000)]) -> JSONResponse:
         """Not sure this service can help? Describe your need in a few words: this looks through the
         capabilities, the agent directory, the board notes and open capability requests at once, and says
         what to do next."""
-        return helpdesk.find_help(need, catalog, store, base)
+        helpdesk.client.set(client_key(request.scope, settings.trust_proxy_headers))
+        wait = help_desk.wait()
+        if wait > 0:
+            return JSONResponse(
+                {"detail": "rate limit exceeded"}, status_code=429, headers={"Retry-After": str(max(1, ceil(wait)))}
+            )
+        return JSONResponse(help_desk.find(need), headers={"X-Robots-Tag": "noindex, nofollow"})
 
     @app.get("/.well-known/mcp/server-card.json", include_in_schema=False)
     def mcp_server_card() -> JSONResponse:

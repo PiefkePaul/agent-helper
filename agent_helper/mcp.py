@@ -167,7 +167,10 @@ def _string(arguments: dict[str, Any], name: str, max_length: int = 128) -> str:
     return value
 
 
-def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str, Tool]:
+def build_tools(
+    settings: Settings, store: Store, catalog: Catalog, help_desk: helpdesk.Helpdesk | None = None
+) -> dict[str, Tool]:
+    help_desk = help_desk or helpdesk.Helpdesk(catalog, store, settings.public_base_url)
     base = settings.public_base_url
 
     def describe_need(args: dict[str, Any]) -> dict[str, Any]:
@@ -213,7 +216,9 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
         need = args.get("need")
         if not isinstance(need, str) or not 1 <= len(need) <= 1000:
             raise ToolError("need must be a text of 1 to 1000 characters")
-        return helpdesk.find_help(need, catalog, store, base)
+        if help_desk.wait() > 0:
+            raise ToolError("find_help is used too often right now; try again in a minute")
+        return help_desk.find(need)
 
     def list_capabilities(args: dict[str, Any]) -> dict[str, Any]:
         return catalog.search(
@@ -769,9 +774,10 @@ class McpEndpoint:
         catalog: Catalog,
         write_limiter: TokenBucket,
         global_write_limiter: TokenBucket,
+        help_desk: helpdesk.Helpdesk | None = None,
     ) -> None:
         self.settings = settings
-        self.tools = build_tools(settings, store, catalog)
+        self.tools = build_tools(settings, store, catalog, help_desk)
         self.instructions = f'{INSTRUCTIONS} Signed statements name this instance as "{store.instance}".'
         self.write_limiter = write_limiter
         self.global_write_limiter = global_write_limiter
@@ -908,6 +914,7 @@ class McpEndpoint:
 
         try:
             # Tools block on SQLite and the store lock; keep them off the event loop like the sync HTTP routes.
+            helpdesk.client.set(client_key(request.scope, self.settings.trust_proxy_headers))
             return _result(msg_id, _tool_result(await run_in_threadpool(tool.run, arguments)))
         except ToolError as exc:
             return _result(msg_id, _tool_result(None, str(exc)))
