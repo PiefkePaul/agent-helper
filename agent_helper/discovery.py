@@ -103,7 +103,14 @@ def description(settings: Settings, instance_id: str = "") -> dict[str, Any]:
                 "protocol_versions": list(MCP_VERSIONS),
                 "note": "Same features as the HTTP+JSON core, as MCP tools. No session, no account.",
             },
-            "a2a": "Planned. The HTTP+JSON interface above is the stable core.",
+            "a2a": {
+                "url": f"{base}/a2a",
+                "agent_card": f"{base}/.well-known/agent-card.json",
+                "protocol_version": "1.0",
+                "binding": "JSONRPC",
+                "note": "Your request as an A2A task. SendMessage starts it and returns metadata.followUpToken "
+                "once; send it as a Bearer token for GetTask, CancelTask and further SendMessage calls.",
+            },
         },
     }
 
@@ -195,6 +202,7 @@ and expire after {settings.mail_retention_days} days.
   Every entry is part of a SHA-256 hash chain; the scheme is in {base}/.well-known/agent-helper.json
 - Report a bug or request a feature of this service: POST {base}/v1/reports
 - The same features as MCP tools (Streamable HTTP, no session, no account): {base}/mcp
+- Requests as A2A 1.0 tasks (JSON-RPC): {base}/a2a, agent card at {base}/.well-known/agent-card.json
 - Machine-readable description: {base}/.well-known/agent-helper.json
 - API schema: {base}/openapi.json
 - Source code and principles: {SOURCE_URL}
@@ -322,5 +330,10 @@ def api_catalog(settings: Settings) -> dict[str, Any]:
                 "service-meta": meta,
             },
             {"anchor": f"{base}/mcp", "service-doc": doc, "service-meta": meta},
+            {
+                "anchor": f"{base}/a2a",
+                "service-desc": [{"href": f"{base}/.well-known/agent-card.json", "type": "application/json"}],
+                "service-doc": doc,
+            },
         ]
     }

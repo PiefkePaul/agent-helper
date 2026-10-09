@@ -13,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 from . import __version__, discovery
+from .a2a import A2AEndpoint, agent_card
 from .catalog import Capability, CapabilityIn, Catalog, load_file_entries
 from .config import Settings, parse_networks
 from .console import build_console
@@ -120,13 +121,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         write_limiter=write_limiter,
         global_write_limiter=global_write_limiter,
         trust_proxy_headers=settings.trust_proxy_headers,
-        self_limited_paths=frozenset({"/mcp"}),
+        self_limited_paths=frozenset({"/mcp", "/a2a"}),
         admin_networks=parse_networks(settings.admin_allowed_nets),
         trusted_proxies=parse_networks(settings.trusted_proxies) or (),
         admin_port=settings.admin_port,
     )
     catalog = Catalog(load_file_entries(settings), store)
     mcp = McpEndpoint(settings, store, catalog, write_limiter, global_write_limiter)
+    a2a = A2AEndpoint(settings, store, write_limiter, global_write_limiter)
 
     @app.exception_handler(HandleUnavailable)
     async def handle_unavailable(_: Request, exc: HandleUnavailable) -> JSONResponse:
@@ -183,6 +185,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             discovery.api_catalog(settings),
             media_type='application/linkset+json; profile="https://www.rfc-editor.org/info/rfc9727"',
         )
+
+    @app.post("/a2a", include_in_schema=False)
+    async def a2a_endpoint(request: Request) -> Response:
+        return await a2a.handle(request)
+
+    @app.get("/.well-known/agent-card.json", include_in_schema=False)
+    def a2a_agent_card() -> dict[str, Any]:
+        return agent_card(settings)
 
     @app.post("/mcp", include_in_schema=False)
     async def mcp_endpoint(request: Request) -> Response:

@@ -397,6 +397,16 @@ class Store:
         self._on_event("request.message", id=req_id, handle=view["handle"], preview=body)
         return view
 
+    def close_request(self, req_id: str, token: str) -> dict[str, Any] | None:
+        """The agent closes its own request (A2A CancelTask). None: wrong id or token."""
+        with self._tx():
+            row = self._check_token("requests", req_id, token)
+            if row is None:
+                return None
+            self._db.execute("UPDATE requests SET status = 'closed' WHERE id = ?", (req_id,))
+            row = self._db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
+            return self._request_view(row)
+
     def get_request_admin(self, req_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
