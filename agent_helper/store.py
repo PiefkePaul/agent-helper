@@ -929,14 +929,16 @@ class Store:
             ).fetchall()
             return [self._cap_request_view(r) | {"hidden_reason": r["hidden_reason"]} for r in rows]
 
-    def decide_capability_request(
-        self, req_id: str, status: str, note: str | None, capability_id: str | None, hidden_reason: str | None
-    ) -> dict[str, Any] | None:
+    _DECISION_FIELDS = ("status", "operator_note", "capability_id", "hidden_reason")
+
+    def update_capability_request(self, req_id: str, changes: dict[str, Any]) -> dict[str, Any] | None:
+        """Change only the given fields (status, operator_note, capability_id, hidden_reason)."""
+        assert set(changes) <= set(self._DECISION_FIELDS)
+        assignments = "".join(f"{name} = ?, " for name in changes)
         with self._lock:
             cur = self._db.execute(
-                "UPDATE capability_requests SET status = ?, operator_note = ?, capability_id = ?,"
-                " hidden_reason = ?, updated_at = ? WHERE id = ?",
-                (status, note, capability_id, hidden_reason, now(), req_id),
+                f"UPDATE capability_requests SET {assignments}updated_at = ? WHERE id = ?",  # noqa: S608
+                (*changes.values(), now(), req_id),
             )
             if cur.rowcount == 0:
                 return None

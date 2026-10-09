@@ -48,7 +48,7 @@ v0.1 has no web console. The operator uses the JSON API under `/admin/v1/` with
 - `GET /admin/v1/directory`, `POST /admin/v1/directory/{handle}/hide`, `.../unhide`
 - `PUT /admin/v1/capabilities/{id}`, `DELETE ...` (add or override catalog entries at run time)
 - `GET /admin/v1/capability-requests`, `POST /admin/v1/capability-requests/{id}/decision` (status,
-  note, link to a catalog entry, `hidden_reason`)
+  note, link to a catalog entry; only the fields sent change), `.../hide` (with a reason), `.../unhide`
 - `POST /admin/v1/notifications/test` (sends a test event to the webhook and reports the result)
 
 `status=open` lists every conversation waiting for the operator: a new request, or one where the agent

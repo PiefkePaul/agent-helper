@@ -56,6 +56,17 @@ class Capability(CapabilityIn):
     source: Literal["catalog", "operator"] = "catalog"
 
 
+def _from_v01(item: dict[str, Any]) -> dict[str, Any]:
+    """Read a v0.1 catalog entry ({id, title, availability, how, details}) as a structured one."""
+    if "summary" in item or "details" not in item:
+        return item
+    upgraded = {k: v for k, v in item.items() if k not in ("how", "details")}
+    upgraded |= {"summary": item["details"], "category": item.get("category", "service")}
+    if item.get("how"):
+        upgraded["access"] = [{"kind": "http", "value": item["how"]}]
+    return upgraded
+
+
 def load_file_entries(settings: Settings) -> list[Capability]:
     if settings.capabilities_file:
         raw = json.loads(Path(settings.capabilities_file).read_text(encoding="utf-8"))
@@ -64,7 +75,7 @@ def load_file_entries(settings: Settings) -> list[Capability]:
     entries = []
     for item in raw.get("capabilities", []):
         try:
-            entries.append(Capability.model_validate(item))
+            entries.append(Capability.model_validate(_from_v01(item)))
         except ValidationError as exc:
             log.warning("skipping invalid catalog entry %r: %d problem(s)", item.get("id"), exc.error_count())
     return entries
@@ -91,7 +102,11 @@ class Catalog:
     def entries(self) -> list[Capability]:
         merged = {e.id: e for e in self.file_entries}
         for item in self.store.list_operator_capabilities():
-            merged[item["id"]] = Capability.model_validate(item | {"source": "operator"})
+            try:
+                merged[item["id"]] = Capability.model_validate(item | {"source": "operator"})
+            except ValidationError:
+                # A stored entry from an older format must not take the whole catalog down.
+                log.warning("skipping invalid operator catalog entry %r", item.get("id"))
         return list(merged.values())
 
     def get(self, cap_id: str) -> Capability | None:

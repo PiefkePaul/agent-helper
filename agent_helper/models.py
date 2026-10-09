@@ -268,7 +268,8 @@ class CapabilityRequestOut(BaseModel):
 
 
 class CapabilityDecisionIn(BaseModel):
-    status: CapabilityRequestStatus
+    """Only the fields that are sent change. Hiding has its own routes."""
+
+    status: CapabilityRequestStatus | None = None
     note: OperatorNote = None  # type: ignore[valid-type]
-    capability_id: Annotated[str | None, Field(max_length=64)] = None
-    hidden_reason: OperatorNote = None  # type: ignore[valid-type]
+    capability_id: Annotated[str | None, Field(max_length=64, pattern=r"^[a-z0-9][a-z0-9-]*$")] = None

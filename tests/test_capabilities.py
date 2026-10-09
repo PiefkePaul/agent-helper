@@ -94,15 +94,15 @@ def test_capability_request_lifecycle(client, admin_headers):
     r = client.post(f"/v1/capability-requests/{first['id']}/votes/withdraw", json=withdraw)
     assert r.json()["votes"] == 1
 
-    decision = {"status": "planned", "note": "Building it.", "capability_id": "ocr"}
+    decision = {"status": "planned", "note": "Building it.", "capability_id": "new-tool"}
     r = client.post(f"/admin/v1/capability-requests/{first['id']}/decision", json=decision, headers=admin_headers)
     assert r.json()["status"] == "planned"
     assert client.get(f"/v1/capability-requests/{first['id']}").json()["operator_note"] == "Building it."
     planned = client.get("/v1/capability-requests", params={"status": "planned"}).json()["requests"]
     assert [p["id"] for p in planned] == [first["id"]]
 
-    hide = {"status": "declined", "hidden_reason": "spam"}
-    client.post(f"/admin/v1/capability-requests/{second['id']}/decision", json=hide, headers=admin_headers)
+    hide = {"reason": "spam"}
+    client.post(f"/admin/v1/capability-requests/{second['id']}/hide", json=hide, headers=admin_headers)
     assert client.get(f"/v1/capability-requests/{second['id']}").status_code == 404
     assert client.post(f"/v1/capability-requests/{second['id']}/votes", json=vote).status_code == 404
     admin_list = client.get("/admin/v1/capability-requests", headers=admin_headers).json()
@@ -129,3 +129,52 @@ def test_capability_request_notifies_operator(make_client):
     _ask(client)
     assert client.app.state.notifier.flush()
     assert rec.events[0]["event"] == "capability.requested"
+
+
+def test_decision_changes_only_sent_fields_and_never_unhides(client, admin_headers):
+    item = _ask(client)
+    url = f"/admin/v1/capability-requests/{item['id']}"
+    client.put(
+        "/admin/v1/capabilities/ocr",
+        json={"title": "OCR", "summary": "x", "category": "tool", "availability": "planned"},
+        headers=admin_headers,
+    )
+    client.post(
+        f"{url}/decision", json={"status": "planned", "note": "soon", "capability_id": "ocr"}, headers=admin_headers
+    )
+    client.post(f"{url}/hide", json={"reason": "spam"}, headers=admin_headers)
+    r = client.post(f"{url}/decision", json={"status": "duplicate"}, headers=admin_headers)
+    assert r.json()["hidden_reason"] == "spam"
+    assert r.json()["operator_note"] == "soon" and r.json()["capability_id"] == "ocr"
+    assert client.get(f"/v1/capability-requests/{item['id']}").status_code == 404
+    client.post(f"{url}/unhide", headers=admin_headers)
+    assert client.get(f"/v1/capability-requests/{item['id']}").status_code == 200
+
+    assert client.post(f"{url}/hide", json={"reason": ""}, headers=admin_headers).status_code == 422
+    bad_link = client.post(f"{url}/decision", json={"capability_id": "nope"}, headers=admin_headers)
+    assert bad_link.status_code == 422
+    assert client.post(f"{url}/decision", json={"capability_id": "../x y"}, headers=admin_headers).status_code == 422
+    assert client.post(f"{url}/decision", json={"status": None}, headers=admin_headers).status_code == 422
+
+
+def test_broken_operator_entry_does_not_break_the_catalog(client, admin_headers):
+    import json as _json
+
+    entry = {"title": "OCR", "summary": "x", "category": "tool", "availability": "planned"}
+    client.put("/admin/v1/capabilities/ocr", json=entry, headers=admin_headers)
+    store = client.app.state.store
+    with store._lock:
+        store._db.execute(
+            "UPDATE operator_capabilities SET data = ? WHERE id = 'ocr'",
+            (_json.dumps(entry | {"availability": "retired"}),),
+        )
+    r = client.get("/v1/capabilities")
+    assert r.status_code == 200 and "ocr" not in {c["id"] for c in r.json()["capabilities"]}
+
+
+def test_v01_catalog_file_is_still_read(make_client, tmp_path):
+    path = tmp_path / "caps.json"
+    old = {"id": "old", "title": "Old", "availability": "available", "how": "POST /v1/x", "details": "Legacy."}
+    path.write_text(json.dumps({"capabilities": [old]}), encoding="utf-8")
+    (cap,) = make_client(capabilities_file=path).get("/v1/capabilities").json()["capabilities"]
+    assert cap["summary"] == "Legacy." and cap["access"] == [{"kind": "http", "value": "POST /v1/x"}]

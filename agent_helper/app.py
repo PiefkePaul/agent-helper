@@ -91,6 +91,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.notifier = notifier
+    app.state.store = store
     write_limiter = TokenBucket(settings.write_per_minute)
     global_write_limiter = TokenBucket(settings.global_write_per_minute)
     app.add_middleware(
@@ -515,7 +516,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @admin.post("/capability-requests/{req_id}/decision")
     def admin_decide_capability_request(req_id: str, body: CapabilityDecisionIn) -> dict[str, Any]:
-        found = store.decide_capability_request(req_id, body.status, body.note, body.capability_id, body.hidden_reason)
+        sent = body.model_fields_set
+        if body.capability_id is not None and catalog.get(body.capability_id) is None:
+            raise HTTPException(422, "capability_id does not name a catalog entry")
+        if "status" in sent and body.status is None:
+            raise HTTPException(422, "status cannot be null")
+        names = {"status": "status", "note": "operator_note", "capability_id": "capability_id"}
+        changes = {column: getattr(body, field) for field, column in names.items() if field in sent}
+        return _update_capability_request(req_id, changes)
+
+    @admin.post("/capability-requests/{req_id}/hide")
+    def admin_hide_capability_request(req_id: str, body: HideIn) -> dict[str, Any]:
+        return _update_capability_request(req_id, {"hidden_reason": body.reason})
+
+    @admin.post("/capability-requests/{req_id}/unhide")
+    def admin_unhide_capability_request(req_id: str) -> dict[str, Any]:
+        return _update_capability_request(req_id, {"hidden_reason": None})
+
+    def _update_capability_request(req_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+        found = store.update_capability_request(req_id, changes)
         if found is None:
             raise HTTPException(404, "no such capability request")
         return found
