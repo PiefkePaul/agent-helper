@@ -38,10 +38,16 @@ def _webhook_url(raw: str | None) -> str | None:
     try:
         parts = urlsplit(raw)
         host = parts.hostname
+        parts.port  # noqa: B018 (raises ValueError for a bad port)
     except ValueError:
         parts, host = None, None
-    if parts is None or parts.scheme.lower() not in ("https", "http") or not host:
-        log.warning("NOTIFY_WEBHOOK_URL must be an http(s) URL with a host; notifications are disabled")
+    bad_chars = any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in raw)
+    if parts is None or parts.scheme.lower() not in ("https", "http") or not host or bad_chars:
+        # Never echo the URL: it may contain a secret.
+        log.warning(
+            "NOTIFY_WEBHOOK_URL must be an http(s) URL with a host, a valid port and no spaces; "
+            "notifications are disabled"
+        )
         return None
     if parts.scheme.lower() == "http" and not _is_private_host(host):
         log.warning("NOTIFY_WEBHOOK_URL uses plain http to a public host; events travel unencrypted")
@@ -49,13 +55,15 @@ def _webhook_url(raw: str | None) -> str | None:
 
 
 def _is_private_host(host: str) -> bool:
-    if host == "localhost" or host.endswith((".local", ".lan", ".internal", ".home.arpa")) or "." not in host:
-        return True
+    host = host.rstrip(".").lower()
     try:
         addr = ipaddress.ip_address(host)
     except ValueError:
-        return False
-    return addr.is_private or addr.is_loopback
+        if host.isdigit():
+            return False  # an IPv4 address written as one number; treat as public
+        local_suffixes = (".localhost", ".local", ".lan", ".internal", ".home.arpa")
+        return host == "localhost" or host.endswith(local_suffixes) or "." not in host
+    return addr.is_private or addr.is_loopback or addr.is_link_local
 
 
 def _bool(name: str, default: bool) -> bool:

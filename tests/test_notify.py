@@ -320,12 +320,25 @@ def test_slow_dripping_receiver_hits_the_overall_deadline(monkeypatch):
         result = http_transport(f"http://127.0.0.1:{server.getsockname()[1]}/", b"{}", {})
         assert time.monotonic() - started < 3
         assert not result.ok and result.error == "deadline exceeded"
+        # The helper thread ended with the closed connection; nothing piles up.
+        assert not any(t.name == "agent-helper-notify-post" and t.is_alive() for t in threading.enumerate())
     finally:
         stop.set()
         server.close()
 
 
-@pytest.mark.parametrize("url", ["http://", "https:///path", "ftp://host/x", "http://[::1"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://",
+        "https:///path",
+        "ftp://host/x",
+        "http://[::1",
+        "http://h:abc/x",
+        "http://h:99999/x",
+        "https://h/bot123/send Message",
+    ],
+)
 def test_settings_reject_webhook_without_host(monkeypatch, url):
     from agent_helper.config import Settings
 
@@ -347,3 +360,44 @@ def test_settings_warn_without_secret_and_on_public_http(monkeypatch, caplog):
     with caplog.at_level("WARNING"):
         Settings.from_env()
     assert caplog.text == ""
+
+
+def test_malformed_response_is_reported_without_retry():
+    import socket
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def garbage():
+        conn, _ = server.accept()
+        conn.recv(65536)
+        conn.sendall(b"NOT HTTP AT ALL" + bytes([13, 10, 13, 10]))
+        conn.close()
+
+    threading.Thread(target=garbage, daemon=True).start()
+    try:
+        result = http_transport(f"http://127.0.0.1:{server.getsockname()[1]}/x", b"{}", {})
+        assert not result.ok and not result.retry and result.error == "BadStatusLine"
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize(
+    ("host", "private"),
+    [
+        ("localhost", True),
+        ("localhost.", True),
+        ("nas", True),
+        ("10.0.0.5", True),
+        ("::1", True),
+        ("fe80::1", True),
+        ("2606:4700::1111", False),
+        ("134744072", False),
+        ("hooks.example.org", False),
+    ],
+)
+def test_private_host_detection(host, private):
+    from agent_helper.config import _is_private_host
+
+    assert _is_private_host(host) is private
