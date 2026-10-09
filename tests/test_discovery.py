@@ -75,7 +75,7 @@ def test_api_catalog_is_an_rfc9727_linkset(client):
     r = client.get("/.well-known/api-catalog")
     assert r.headers["content-type"].startswith("application/linkset+json")
     anchors = {item["anchor"] for item in r.json()["linkset"]}
-    assert anchors == {"http://testserver/v1", "http://testserver/mcp"}
+    assert anchors == {"http://testserver/v1", "http://testserver/mcp", "http://testserver/a2a"}
 
 
 def test_descriptions_mention_the_mcp_endpoint(client):

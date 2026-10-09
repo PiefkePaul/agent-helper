@@ -16,11 +16,14 @@ NOTIFY_EVENTS = (
     "request.created",
     "request.message",
     "report.created",
+    "request.closed",
     "board.posted",
     "directory.published",
     "capability.requested",
 )
-DEFAULT_NOTIFY_EVENTS = frozenset({"request.created", "request.message", "report.created", "capability.requested"})
+DEFAULT_NOTIFY_EVENTS = frozenset(
+    {"request.created", "request.message", "report.created", "request.closed", "capability.requested"}
+)
 
 log = logging.getLogger("agent_helper")
 
@@ -93,6 +96,12 @@ def _is_private_host(host: str) -> bool:
     return addr.is_private or addr.is_loopback or addr.is_link_local
 
 
+def _tristate(name: str) -> bool | None:
+    """true/false, or None for "auto" or unset."""
+    raw = (os.environ.get(name) or "auto").strip().lower()
+    return None if raw == "auto" else raw in {"1", "true", "yes", "on"}
+
+
 def _bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -115,6 +124,7 @@ class Settings:
     log_level: str = "info"
     admin_allowed_nets: str = DEFAULT_ADMIN_NETS
     trusted_proxies: str = ""
+    admin_cookie_secure: bool | None = None  # None: decided per request (https or not)
     admin_port: int | None = None
     max_mailbox_messages: int = 500
     mail_retention_days: int = 90
@@ -149,6 +159,7 @@ class Settings:
             log_level=os.environ.get("LOG_LEVEL", cls.log_level),
             admin_allowed_nets=os.environ.get("ADMIN_ALLOWED_NETS") or cls.admin_allowed_nets,
             trusted_proxies=os.environ.get("TRUSTED_PROXIES", cls.trusted_proxies),
+            admin_cookie_secure=_tristate("ADMIN_COOKIE_SECURE"),
             admin_port=_int("ADMIN_PORT", 0) or None,
             max_mailbox_messages=_int("MAX_MAILBOX_MESSAGES", cls.max_mailbox_messages),
             mail_retention_days=_int("MAIL_RETENTION_DAYS", cls.mail_retention_days),
