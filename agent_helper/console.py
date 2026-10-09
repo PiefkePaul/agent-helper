@@ -45,6 +45,7 @@ SESSION_SECONDS = 12 * 3600
 MAX_SESSIONS = 20
 CSP = "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 LOG_LINES = 500
+LOGIN_DELAY_SECONDS = 0.5
 
 e = html.escape
 
@@ -346,7 +347,7 @@ def build_console(
         form = await _form(request)
         given = form.get("secret", "").encode()
         if not hmac.compare_digest(given, (settings.admin_secret or "").encode()):
-            await asyncio.sleep(0.5)  # on top of the write rate limit; never blocks other requests
+            await asyncio.sleep(LOGIN_DELAY_SECONDS)  # on top of the write rate limit; never blocks others
             return _redirect("/admin/login", "Wrong secret.", error=True)
         token, _ = sessions.create()
         response = RedirectResponse("/admin/console", status_code=303)
