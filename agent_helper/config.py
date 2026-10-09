@@ -6,6 +6,7 @@ import ipaddress
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -94,14 +95,30 @@ def _push_mode(raw: str | None) -> str:
     return mode
 
 
-def _key_ids(raw: str) -> tuple[str, ...]:
-    """Comma-separated key ids (16 hex digits each). A malformed entry stops the start: a typo must not
-    leave a key trusted that the operator meant to revoke."""
-    ids = tuple(part.strip().lower() for part in raw.split(",") if part.strip())
-    bad = [i for i in ids if len(i) != 16 or any(c not in "0123456789abcdef" for c in i)]
-    if bad:
-        raise SystemExit(f"REVOKED_KEY_IDS must list key ids of 16 hex digits; not valid: {bad[0][:20]!r}")
-    return ids
+def _key_ids(raw: str) -> tuple[tuple[str, str | None], ...]:
+    """Comma-separated key ids (16 hex digits), each optionally with the time it counts as revoked from:
+    `id@2026-10-09T12:00:00Z`. A malformed entry stops the start: a typo must not leave a key trusted that
+    the operator meant to revoke."""
+    out = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        kid, _, since = part.partition("@")
+        kid = kid.strip().lower()
+        valid = len(kid) == 16 and all(c in "0123456789abcdef" for c in kid)
+        if since:
+            try:
+                datetime.strptime(since.strip(), "%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                valid = False
+        if not valid:
+            raise SystemExit(
+                "REVOKED_KEY_IDS must list key ids of 16 hex digits, each optionally @YYYY-MM-DDTHH:MM:SSZ; "
+                f"not valid: {part[:40]!r}"
+            )
+        out.append((kid, since.strip() or None))
+    return tuple(out)
 
 
 def parse_networks(raw: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] | None:
@@ -173,7 +190,7 @@ class Settings:
     notify_max_per_minute: int = 30
     board_checkpoint_seconds: int = 3600
     instance_signing_key_file: Path | None = None
-    revoked_key_ids: tuple[str, ...] = ()
+    revoked_key_ids: tuple[tuple[str, str | None], ...] = ()
     push_mode: str = "off"
     push_allowed_domains: str = ""
     push_deny_domains: str = ""

@@ -50,7 +50,11 @@ the details open.
    key cannot be restored with `restore-instance-id`, and the current key cannot be revoked (move to a new
    key first). Because revocations in the database are lost when an older backup is restored,
    `REVOKED_KEY_IDS` (comma-separated key ids in the configuration) lists keys that always count as
-   revoked, also ones this database never knew (published with an empty `public_key`). The service
+   revoked, also ones this database never knew. Each entry may carry the time it counts from
+   (`<key id>@2026-10-09T12:00:00Z`); without one, the service start is used and `reason` says so. An
+   earlier `since` already recorded is never moved later, since verifiers weigh copies by it.
+   Entries in `previous_keys` may therefore have an empty `public_key`: the key is revoked, but this
+   database never held it; checkpoints that name it are ignored. The service
    refuses to start if the current key is listed or an entry is malformed.
 
 ## For verifiers

@@ -253,11 +253,13 @@ def test_configured_revocations_survive_a_restore(make_client, tmp_path):
     # The database is restored from the backup, which knows nothing of any revocation; the configured
     # list still applies.
     shutil.copy(backup, tmp_path / "agent-helper.db")
-    client = make_client(board_checkpoint_seconds=0, instance_signing_key_file=key_file, revoked_key_ids=(old_id,))
+    client = make_client(
+        board_checkpoint_seconds=0, instance_signing_key_file=key_file, revoked_key_ids=((old_id, None),)
+    )
     store = client.app.state.store
     assert store.other_keys[old_id]["status"] == "revoked" and store.other_keys[old_id]["public_key"] == old_key
     unknown = "0123456789abcdef"
-    other = make_client(instance_signing_key_file=key_file, revoked_key_ids=(old_id, unknown))
+    other = make_client(instance_signing_key_file=key_file, revoked_key_ids=((old_id, None), (unknown, None)))
     entry = other.app.state.store.other_keys[unknown]
     assert entry["status"] == "revoked" and entry["public_key"] == ""
     cp = {"seq": 1, "entry_hash": "0" * 64, "time": "2026-01-01T00:00:00Z", "key_id": unknown, "signature": "x"}
@@ -269,7 +271,7 @@ def test_the_current_key_cannot_be_listed_as_revoked(make_client):
     client = make_client()
     current = client.app.state.store.key_id
     with pytest.raises(SystemExit):
-        make_client(revoked_key_ids=(current,))
+        make_client(revoked_key_ids=((current, None),))
 
 
 def test_malformed_revoked_key_ids_stop_the_start(monkeypatch):
@@ -279,4 +281,29 @@ def test_malformed_revoked_key_ids_stop_the_start(monkeypatch):
     with pytest.raises(SystemExit):
         Settings.from_env()
     monkeypatch.setenv("REVOKED_KEY_IDS", " 0123456789ABCDEF ,")
-    assert Settings.from_env().revoked_key_ids == ("0123456789abcdef",)
+    assert Settings.from_env().revoked_key_ids == (("0123456789abcdef", None),)
+    monkeypatch.setenv("REVOKED_KEY_IDS", "0123456789abcdef@2026-10-09T12:00:00Z")
+    assert Settings.from_env().revoked_key_ids == (("0123456789abcdef", "2026-10-09T12:00:00Z"),)
+    monkeypatch.setenv("REVOKED_KEY_IDS", "0123456789abcdef@yesterday")
+    with pytest.raises(SystemExit):
+        Settings.from_env()
+
+
+def test_revocation_times_are_never_moved_later(make_client, tmp_path):
+    key_file = tmp_path / "instance.key"
+    key_file.write_text(keys.new_private_key())
+    kid = "0123456789abcdef"
+    first = make_client(instance_signing_key_file=key_file, revoked_key_ids=((kid, "2026-10-01T00:00:00Z"),))
+    assert first.app.state.store.other_keys[kid]["since"] == "2026-10-01T00:00:00Z"
+    first.__exit__(None, None, None)
+    later = make_client(instance_signing_key_file=key_file, revoked_key_ids=((kid, "2026-10-05T00:00:00Z"),))
+    assert later.app.state.store.other_keys[kid]["since"] == "2026-10-01T00:00:00Z"
+    later.__exit__(None, None, None)
+    undated = make_client(instance_signing_key_file=key_file, revoked_key_ids=((kid, None),))
+    assert undated.app.state.store.other_keys[kid]["since"] == "2026-10-01T00:00:00Z"
+    undated.__exit__(None, None, None)
+    earlier = make_client(instance_signing_key_file=key_file, revoked_key_ids=((kid, "2026-09-01T00:00:00Z"),))
+    assert earlier.app.state.store.other_keys[kid]["since"] == "2026-09-01T00:00:00Z"
+    fresh = "fedcba9876543210"
+    undated_new = make_client(instance_signing_key_file=key_file, revoked_key_ids=((fresh, None),))
+    assert "without a date" in undated_new.app.state.store.other_keys[fresh]["reason"]
