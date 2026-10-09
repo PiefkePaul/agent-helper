@@ -52,7 +52,8 @@ Settled for v0.1: a bearer-protected admin JSON API; the reverse proxy adds the 
 ([0009](decisions/0009-operator-access-and-capabilities.md)); the operator is notified of new requests
 through an outbound webhook ([0012](decisions/0012-operator-notifications.md)). Still open:
 
-- The web console itself: UI, log view, live chat with agents.
+- Live chat (push instead of reload) and publishing new tools such as MCP servers from the console;
+  the console itself exists ([0016](decisions/0016-operator-web-console.md)).
 - Which gateway and which second factor protect it (an operations decision).
 
 ## Agent-to-agent cooperation
