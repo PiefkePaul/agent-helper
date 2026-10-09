@@ -123,3 +123,20 @@ def test_new_id_can_revoke_the_old_key_at_once(make_client, tmp_path, monkeypatc
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     assert main(["new-instance-id", "--revoke-old-key", "--confirm", instance]) == 0
     assert _keys_after(make_client)[1][first_id]["status"] == "revoked"
+
+
+def test_maintenance_connection_keeps_the_integrity_settings(stopped_db):
+    from agent_helper.maintenance import _open
+
+    db_path, _ = stopped_db
+    db = _open(db_path)
+    try:
+        assert db.execute("PRAGMA recursive_triggers").fetchone()[0] == 1
+        assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute(
+                "INSERT OR REPLACE INTO board_chain (seq, created_at, payload_sha256, prev_hash, entry_hash, v)"
+                " VALUES (1, 'x', 'x', 'x', 'forged', 1)"
+            )
+    finally:
+        db.close()
