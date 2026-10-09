@@ -240,8 +240,9 @@ class ClientFilter:
                     raise SystemExit(f"RELAY_ALLOWED_CLIENTS: not a network or host name: {entry[:60]!r}") from None
                 self.hosts.append(name.rstrip("."))
         self.resolver, self.clock, self.refresh, self.max_stale = resolver, clock, refresh, max_stale
-        self._resolved: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
-        self._resolved_at = -1e18  # last successful lookup
+        # Per host name: its last known addresses and when it last resolved, so one failing name does not
+        # take the others down with it.
+        self._resolved: dict[str, tuple[set[ipaddress.IPv4Address | ipaddress.IPv6Address], float]] = {}
         self._tried_at = -1e18
         self._warned_private = False
         self._lock = threading.Lock()
@@ -252,25 +253,24 @@ class ClientFilter:
 
     def refresh_if_stale(self) -> None:
         now = self.clock()
-        if not self.hosts or now - self._tried_at < self.refresh:
-            return
-        self._tried_at = now
-        found: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
-        failed = False
+        with self._lock:
+            if not self.hosts or now - self._tried_at < self.refresh:
+                return
+            self._tried_at = now  # under the lock: concurrent requests start one round of lookups, not many
         for host in self.hosts:
             try:
-                found |= {ipaddress.ip_address(a.split("%")[0]) for a in self.resolver(host, 443)}
+                found = {ipaddress.ip_address(a.split("%")[0]) for a in self.resolver(host, 443)}
             except (OSError, ValueError):
-                failed = True
-        with self._lock:
-            if not failed:
-                self._resolved, self._resolved_at = found, now
-                return
-            if now - self._resolved_at > self.max_stale:
-                self._resolved = set()
-                log.warning("RELAY_ALLOWED_CLIENTS: lookups keep failing; host names admit nobody until one works")
-            else:
-                log.warning("RELAY_ALLOWED_CLIENTS: lookup failed; keeping the last known addresses for now")
+                with self._lock:
+                    _, at = self._resolved.get(host, (set(), -1e18))
+                    stale = now - at > self.max_stale
+                log.warning(
+                    "RELAY_ALLOWED_CLIENTS: lookup of one name failed; %s",
+                    "it admits nobody until a lookup works" if stale else "keeping its last known addresses for now",
+                )
+                continue
+            with self._lock:
+                self._resolved[host] = (found, now)
 
     def allows(self, raw: str | None) -> bool:
         if not self.active:
@@ -283,10 +283,9 @@ class ClientFilter:
             addr = addr.ipv4_mapped
         if any(addr in net for net in self.nets if net.version == addr.version):
             return True
+        now = self.clock()
         with self._lock:
-            if self.clock() - self._resolved_at > self.max_stale:
-                self._resolved = set()
-            if addr in self._resolved:
+            if any(addr in found and now - at <= self.max_stale for found, at in self._resolved.values()):
                 return True
         if not addr.is_global and not self._warned_private:
             # A private or loopback peer usually means a proxy or Docker's userland proxy in front: then every

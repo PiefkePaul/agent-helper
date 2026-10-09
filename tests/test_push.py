@@ -1087,3 +1087,23 @@ def test_relay_settings_read_the_client_list(monkeypatch):
     settings = RelaySettings.from_env()
     assert settings.allowed_clients == ("198.51.100.0/24", "home.example.net")
     assert settings.allowed_clients_max_stale == 600
+
+
+def test_one_failing_name_does_not_take_the_others_down():
+    from agent_helper.relay import ClientFilter
+
+    clock = FakeClock()
+    working = {"a.example.net": True, "b.example.net": True}
+
+    def resolver(host, port):
+        if not working[host]:
+            raise OSError("no answer")
+        return ["93.184.215.14"] if host == "a.example.net" else ["93.184.215.20"]
+
+    flt = ClientFilter(("a.example.net", "b.example.net"), resolver=resolver, clock=clock, max_stale=3600)
+    flt.refresh_if_stale()
+    working["b.example.net"] = False
+    clock.now += 3601
+    flt.refresh_if_stale()
+    assert flt.allows("93.184.215.14")  # a still resolves
+    assert not flt.allows("93.184.215.20")  # b failed for longer than max_stale

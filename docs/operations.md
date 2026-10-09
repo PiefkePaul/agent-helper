@@ -150,6 +150,12 @@ published by Docker's normal NAT (not the userland proxy) or the container uses 
 a reverse proxy every call comes from the proxy's address, so restrict there instead; the relay logs a
 warning when it sees a private caller address.
 
+A host name in `RELAY_ALLOWED_CLIENTS` (and in the firewall's allowlist) is only as trustworthy as its
+DNS: whoever can change the record can admit their own address. Protect the account at the DNS or
+dynamic DNS provider with two-factor authentication, and let the relay's server resolve through a
+DNSSEC-validating resolver, so forged answers are rejected. Each name is cached separately; one that
+stops resolving does not affect the others.
+
 **Rotating `RELAY_SECRET`.** There is one secret, shared by both sides, so a rotation is a short, planned
 interruption of pushes, not of the service:
 
