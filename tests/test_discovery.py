@@ -28,7 +28,7 @@ def test_openapi_does_not_list_admin_routes(client):
 
 def test_capabilities_state_availability_honestly(client):
     caps = client.get("/v1/capabilities").json()["capabilities"]
-    allowed = {"available", "on_request", "human_in_the_loop", "not_available"}
+    allowed = {"available", "on_request", "human_in_the_loop", "planned", "not_available"}
     assert caps and all(c["availability"] in allowed for c in caps)
     assert any(c["availability"] == "not_available" for c in caps)
 

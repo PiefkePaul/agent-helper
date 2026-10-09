@@ -8,8 +8,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MIN_ADMIN_SECRET_LENGTH = 32
-NOTIFY_EVENTS = ("request.created", "request.message", "report.created", "board.posted", "directory.published")
-DEFAULT_NOTIFY_EVENTS = frozenset({"request.created", "request.message", "report.created"})
+NOTIFY_EVENTS = (
+    "request.created",
+    "request.message",
+    "report.created",
+    "board.posted",
+    "directory.published",
+    "capability.requested",
+)
+DEFAULT_NOTIFY_EVENTS = frozenset({"request.created", "request.message", "report.created", "capability.requested"})
 
 log = logging.getLogger("agent_helper")
 

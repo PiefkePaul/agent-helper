@@ -88,6 +88,8 @@ def _summary(event: str, fields: dict[str, Any]) -> str:
             return f"New {fields.get('kind', 'other')} report {fields['id']} (quarantined)"
         case "board.posted":
             return f"New board entry #{fields['seq']}{who}"
+        case "capability.requested":
+            return f"New capability request {fields['id']}{who}"
         case "directory.published":
             return f"Directory profile published or updated{who}"
         case _:

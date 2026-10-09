@@ -233,3 +233,42 @@ class ReferralIn(BaseModel):
     note: MessageText  # type: ignore[valid-type]
     include_request_text: bool = False
     include_requester_handle: bool = False
+
+
+# --- capability requests (docs/decisions/0014) --------------------------------------------------------
+
+CapabilityRequestStatus = Literal["open", "planned", "in_progress", "available", "declined", "duplicate"]
+
+
+class CapabilityRequestIn(BaseModel):
+    title: _text(120)  # type: ignore[valid-type]
+    description: _text(2000)  # type: ignore[valid-type]
+    tags: list[Tag] = Field(default_factory=list, max_length=10)
+    handle: Handle = None
+    handle_token: HandleToken = None
+
+
+class VoteIn(BaseModel):
+    handle: RequiredHandle
+    handle_token: HandleToken = None
+
+
+class CapabilityRequestOut(BaseModel):
+    id: str
+    created_at: str
+    updated_at: str
+    title: str
+    description: str
+    tags: list[str]
+    requested_by: str | None
+    votes: int
+    status: CapabilityRequestStatus
+    operator_note: str | None
+    capability_id: str | None
+
+
+class CapabilityDecisionIn(BaseModel):
+    status: CapabilityRequestStatus
+    note: OperatorNote = None  # type: ignore[valid-type]
+    capability_id: Annotated[str | None, Field(max_length=64)] = None
+    hidden_reason: OperatorNote = None  # type: ignore[valid-type]

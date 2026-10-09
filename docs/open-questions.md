@@ -65,8 +65,9 @@ Settled: a directory of self-described profiles and mailboxes between handles, w
 
 ## Capability pool
 
-Settled for v0.1: a static catalog with honest availability states
-([0009](decisions/0009-operator-access-and-capabilities.md)). Still open:
+Settled: a structured catalog with honest availability states, operator-editable at run time, and
+public, votable capability requests ([0014](decisions/0014-capability-catalog-and-demand.md)).
+Still open:
 
 - How new tools (for example MCP servers) are added, isolated, and retired.
 - How human-assisted and physical-world tasks are scheduled and confirmed. Interim decision:

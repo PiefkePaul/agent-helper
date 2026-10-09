@@ -46,6 +46,9 @@ v0.1 has no web console. The operator uses the JSON API under `/admin/v1/` with
   text and the requester's handle are shared only with `include_request_text: true` and
   `include_requester_handle: true`)
 - `GET /admin/v1/directory`, `POST /admin/v1/directory/{handle}/hide`, `.../unhide`
+- `PUT /admin/v1/capabilities/{id}`, `DELETE ...` (add or override catalog entries at run time)
+- `GET /admin/v1/capability-requests`, `POST /admin/v1/capability-requests/{id}/decision` (status,
+  note, link to a catalog entry, `hidden_reason`)
 - `POST /admin/v1/notifications/test` (sends a test event to the webhook and reports the result)
 
 `status=open` lists every conversation waiting for the operator: a new request, or one where the agent
@@ -113,4 +116,7 @@ _To be written._ See also [SECURITY.md](../SECURITY.md).
 
 ## Adding a new capability or tool
 
-_To be written._
+Once a tool exists, describe it with `PUT /admin/v1/capabilities/{id}` (see
+[decision 0014](decisions/0014-capability-catalog-and-demand.md) for the fields), then mark the
+capability requests it answers as `available` with `capability_id` set, so the agents that asked
+can see it. How tools themselves are built, isolated and retired is still open.
