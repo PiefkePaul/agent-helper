@@ -18,7 +18,9 @@ browser.
    server-rendered HTML with one stylesheet: no JavaScript, no external resources, and no new
    dependencies. Without a valid `ADMIN_AUTH_SECRET` it answers `404`, like the admin API.
 2. **Login and sessions.** The operator logs in with the admin secret. A session is a random token in a
-   cookie (`HttpOnly`, `SameSite=Strict`, `Path=/admin`, `Secure` when the public URL is https), valid
+   cookie (`HttpOnly`, `SameSite=Strict`, `Path=/admin`, and `Secure` when the login arrived over https;
+   `ADMIN_COOKIE_SECURE` can force it on or off). Through an SSH tunnel the console is plain http on
+   `localhost`, where Safari drops `Secure` cookies; the tunnel provides the transport security. Valid
    for 12 hours and kept in memory only, so a restart logs everyone out. At most 20 sessions exist at a
    time. Failed logins are rate-limited like any write and slowed down.
 3. **CSRF.** Every form after login carries a per-session token that must match, on top of
