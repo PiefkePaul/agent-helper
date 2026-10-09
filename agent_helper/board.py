@@ -40,18 +40,21 @@ def payload_hash(
     return sha256_hex(canonical_json(payload))
 
 
-def entry_hash(seq: int, created_at: str, payload_sha256: str, prev_hash: str, v: int = 1) -> str:
-    return sha256_hex(
-        canonical_json(
-            {
-                "v": v,
-                "seq": seq,
-                "created_at": created_at,
-                "payload_sha256": payload_sha256,
-                "prev_hash": prev_hash,
-            }
-        )
-    )
+def entry_hash(
+    seq: int, created_at: str, payload_sha256: str, prev_hash: str, v: int = 1, expires_at: str | None = None
+) -> str:
+    """Version 2 also hashes `expires_at` (null when there is none) into the chain itself, so the expiry stays
+    verifiable after the payload is deleted, and an entry without an expiry can never pose as expired."""
+    fields: dict[str, Any] = {
+        "v": v,
+        "seq": seq,
+        "created_at": created_at,
+        "payload_sha256": payload_sha256,
+        "prev_hash": prev_hash,
+    }
+    if v >= 2:
+        fields["expires_at"] = expires_at
+    return sha256_hex(canonical_json(fields))
 
 
 @dataclass(frozen=True)
@@ -75,7 +78,7 @@ def verify_chain(entries: Iterable[Mapping[str, Any]], now: str | None = None) -
 
     Hidden and expired entries carry no payload; for them only the chain links are checked. An entry
     marked expired must be version 2 with an expiry between its creation and `now` (default: the current
-    UTC time). After the payload is purged, its `expires_at` itself is no longer covered by a hash.
+    UTC time); its `expires_at` is part of the version 2 entry hash, so it cannot be changed.
     """
     now = now or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     prev = GENESIS_HASH
@@ -94,7 +97,7 @@ def verify_chain(entries: Iterable[Mapping[str, Any]], now: str | None = None) -
             actual = payload_hash(e.get("author"), e.get("topic"), e["content"], e.get("tags"), e.get("expires_at"), v)
             if actual != e["payload_sha256"]:
                 return VerifyResult(False, checked, prev, "payload does not match payload_sha256", seq)
-        actual_entry = entry_hash(seq, e["created_at"], e["payload_sha256"], prev, v)
+        actual_entry = entry_hash(seq, e["created_at"], e["payload_sha256"], prev, v, e.get("expires_at"))
         if actual_entry != e["entry_hash"]:
             return VerifyResult(False, checked, prev, "entry_hash does not match", seq)
         prev = actual_entry

@@ -164,3 +164,27 @@ def test_paging_and_strict_expiry(client):
     assert r.json()["next_offset"] is None
     assert client.post("/v1/board", json={"content": "x", "expires_in_days": True}).status_code == 422
     assert client.post("/v1/board", json={"content": "x", "expires_in_days": "3"}).status_code == 422
+
+
+def test_deleting_a_note_and_faking_its_expiry_breaks_the_chain(client):
+    """The attack from review: delete a v2 payload and record a made-up expiry."""
+    long_lived = _post(client, content="kept for ten years", tags=["t"], expires_in_days=3650)
+    no_expiry = _post(client, content="tagged, never expires", tags=["t"])
+    _post(client, content="later")
+    store = client.app.state.store
+    fake = "2026-10-09T23:59:59Z"
+    with store._lock:
+        for entry in (long_lived, no_expiry):
+            created = entry["created_at"]
+            fake = created[:-3] + "59Z" if created[-3:] != "59Z" else created
+            store._db.execute("INSERT INTO board_expired VALUES (?, ?)", (entry["seq"], fake))
+            store._db.execute("DELETE FROM board_search WHERE seq = ?", (entry["seq"],))
+            store._db.execute("DELETE FROM board_payloads WHERE seq = ?", (entry["seq"],))
+    entries = _all(client)
+    assert [e["expired"] for e in entries[:2]] == [True, True]  # what the tampered server claims
+    result = verify_chain(entries, now="2999-01-01T00:00:00Z")
+    assert not result.ok and result.failed_seq == long_lived["seq"]
+    # Even with the first entry repaired, the second (no expiry at all) is caught.
+    entries[0] = {**entries[0], "expires_at": long_lived["expires_at"]}
+    result = verify_chain(entries, now="2999-01-01T00:00:00Z")
+    assert not result.ok and result.failed_seq == no_expiry["seq"]

@@ -84,7 +84,8 @@ def description(settings: Settings) -> dict[str, Any]:
             "canonical_json": "JSON, keys sorted, separators ',' and ':', UTF-8, non-ASCII unescaped",
             "payload_sha256": "v1: sha256(canonical_json({author, topic, content})); "
             "v2 (entries with tags or expiry): sha256(canonical_json({author, topic, content, tags, expires_at}))",
-            "entry_hash": "sha256(canonical_json({v, seq, created_at, payload_sha256, prev_hash})), v from the entry",
+            "entry_hash": "v1: sha256(canonical_json({v, seq, created_at, payload_sha256, prev_hash})); "
+            "v2: the same plus expires_at (null if none)",
             "genesis_prev_hash": board.GENESIS_HASH,
             "hidden_entries": "Payload withheld, hashes kept; the chain still verifies.",
             "expired_entries": "After expires_at the payload is withheld and later deleted; hashes stay.",

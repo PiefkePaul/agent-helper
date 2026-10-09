@@ -71,6 +71,11 @@ CREATE TABLE IF NOT EXISTS board_hidden (
     hidden_at TEXT NOT NULL,
     reason    TEXT NOT NULL
 );
+-- Lower-cased topic and text of visible payloads, for search (docs/decisions/0015).
+CREATE TABLE IF NOT EXISTS board_search (
+    seq  INTEGER PRIMARY KEY REFERENCES board_chain (seq),
+    text TEXT NOT NULL
+);
 -- Entries whose payload was deleted at its expiry (docs/decisions/0015). The chain row stays.
 CREATE TABLE IF NOT EXISTS board_expired (
     seq        INTEGER PRIMARY KEY REFERENCES board_chain (seq),
@@ -178,6 +183,11 @@ class MailLimits:
     max_blocks: int = 1000
 
 
+def _search_text(topic: str | None, content: str) -> str:
+    # Python's lower() folds all scripts; SQLite's only ASCII.
+    return f"{topic or ''} {content}".lower()
+
+
 def now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -214,8 +224,6 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.execute("PRAGMA secure_delete=ON")  # deleted text (expired notes, purged mail) is overwritten
-        # SQLite's lower() only folds ASCII; search compares Python-lowercased text on both sides.
-        self._db.create_function("py_lower", 1, lambda s: s.lower() if isinstance(s, str) else s, deterministic=True)
         self._last_board_purge = -1e9
         self._db.executescript(SCHEMA)
         self._migrate()
@@ -232,6 +240,15 @@ class Store:
                 if name not in present:
                     self._db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
         self._db.execute("CREATE INDEX IF NOT EXISTS board_by_expiry ON board_payloads (expires_at)")
+        # Payloads cannot be updated, so the lower-cased search text lives in its own table; fill it for old rows.
+        missing = self._db.execute(
+            "SELECT p.seq, p.topic, p.content FROM board_payloads p"
+            " LEFT JOIN board_search s ON s.seq = p.seq WHERE s.seq IS NULL"
+        ).fetchall()
+        self._db.executemany(
+            "INSERT INTO board_search (seq, text) VALUES (?, ?)",
+            [(r["seq"], _search_text(r["topic"], r["content"])) for r in missing],
+        )
 
     @contextmanager
     def _tx(self) -> Iterator[None]:
@@ -438,7 +455,7 @@ class Store:
                 )
             v = 2 if tags or expires_at else 1
             p_hash = board.payload_hash(author, topic, content, tags, expires_at, v)
-            e_hash = board.entry_hash(seq, ts, p_hash, prev, v)
+            e_hash = board.entry_hash(seq, ts, p_hash, prev, v, expires_at)
             self._db.execute(
                 "INSERT INTO board_chain (seq, created_at, payload_sha256, prev_hash, entry_hash, v)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
@@ -448,6 +465,7 @@ class Store:
                 "INSERT INTO board_payloads (seq, author, topic, content, tags, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (seq, author, topic, content, json.dumps(tags) if v == 2 else None, expires_at),
             )
+            self._db.execute("INSERT INTO board_search (seq, text) VALUES (?, ?)", (seq, _search_text(topic, content)))
             entry = self._board_entries(only_seq=seq)[0]
         if not as_operator:
             self._on_event("board.posted", seq=seq, handle=author, preview=content)
@@ -502,6 +520,11 @@ class Store:
             " SELECT seq, expires_at FROM board_payloads WHERE expires_at IS NOT NULL AND expires_at <= ?",
             (ts,),
         )
+        self._db.execute(
+            "DELETE FROM board_search WHERE seq IN"
+            " (SELECT seq FROM board_payloads WHERE expires_at IS NOT NULL AND expires_at <= ?)",
+            (ts,),
+        )
         self._db.execute("DELETE FROM board_payloads WHERE expires_at IS NOT NULL AND expires_at <= ?", (ts,))
 
     def search_board(
@@ -517,7 +540,7 @@ class Store:
         params: list[Any] = [now()]
         for term in (query or "").lower().split()[:8]:
             escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            where.append("py_lower(coalesce(p.topic, '') || ' ' || p.content) LIKE ? ESCAPE '\\'")
+            where.append("s.text LIKE ? ESCAPE '\\'")
             params.append(f"%{escaped}%")
         if tag:
             where.append("EXISTS (SELECT 1 FROM json_each(coalesce(p.tags, '[]')) WHERE value = ?)")
@@ -525,7 +548,10 @@ class Store:
         if author:
             where.append("p.author = ?")
             params.append(author)
-        sql = f"{self._BOARD_SELECT} WHERE {' AND '.join(where)} ORDER BY c.seq DESC LIMIT ? OFFSET ?"  # noqa: S608
+        sql = (
+            f"{self._BOARD_SELECT} JOIN board_search s ON s.seq = c.seq"  # noqa: S608
+            f" WHERE {' AND '.join(where)} ORDER BY c.seq DESC LIMIT ? OFFSET ?"
+        )
         with self._lock:
             self._purge_board_if_due()
             rows = self._db.execute(sql, (*params, limit, offset)).fetchall()
