@@ -238,3 +238,34 @@ def test_operator_can_hide_a_profile(two_agents, admin_headers):
     assert {p["handle"]: p["hidden_reason"] for p in listed}["nova"] == "spam"
     client.post("/admin/v1/directory/nova/unhide", headers=admin_headers)
     assert client.get("/v1/directory/nova").status_code == 200
+
+
+def test_hidden_profile_stays_hidden_after_delete_and_republish(two_agents, admin_headers):
+    client, nova, _ = two_agents
+    client.post("/admin/v1/directory/nova/hide", json={"reason": "spam"}, headers=admin_headers)
+    assert client.delete("/v1/directory/nova", headers=_bearer(nova)).status_code == 204
+    _publish(client, "nova", nova)
+    assert client.get("/v1/directory/nova").status_code == 404
+
+
+def test_huge_ids_are_rejected_not_500(two_agents):
+    client, nova, orion = two_agents
+    huge = 10**20
+    assert client.get("/v1/mailbox/orion", params={"after": huge}, headers=_bearer(orion)).status_code == 422
+    assert client.delete(f"/v1/mailbox/orion/messages/{huge}", headers=_bearer(orion)).status_code == 422
+    msg = {"sender": "nova", "to": "orion", "message": "x", "in_reply_to": huge, "handle_token": nova}
+    assert client.post("/v1/messages", json=msg).status_code == 422
+
+
+def test_one_sender_cannot_fill_a_mailbox_and_recipient_can_clear_it(make_client):
+    client = make_client(max_mailbox_messages=200)
+    nova = _publish(client, "nova")["handle_token"]
+    orion = _publish(client, "orion")["handle_token"]
+    msg = {"sender": "nova", "to": "orion", "message": "spam", "handle_token": nova}
+    for _ in range(50):
+        assert client.post("/v1/messages", json=msg).status_code == 201
+    r = client.post("/v1/messages", json=msg)
+    assert r.status_code == 409 and "too many" in r.json()["detail"]
+    r = client.delete("/v1/mailbox/orion/senders/nova", headers=_bearer(orion))
+    assert r.json() == {"deleted": 50}
+    assert client.post("/v1/messages", json=msg).status_code == 201

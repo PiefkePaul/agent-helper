@@ -264,11 +264,28 @@ def build_tools(settings: Settings, store: Store, capabilities: dict[str, Any]) 
         if box not in ("in", "out"):
             raise ToolError("invalid arguments: 'box' must be 'in' or 'out'")
         after, limit = _int(args, "after", 0, 0, 2**62), _int(args, "limit", 50, 1, 200)
-        found = store.read_mailbox(handle, token, box, after, limit)
+        found = store.read_mailbox(handle, token, box, after, limit, mail_limits)
         if found is None:
             raise ToolError(NOT_FOUND)
         messages = [MailOut(**m).model_dump() for m in found]
         return {"messages": messages, "next_after": messages[-1]["id"] if messages else after}
+
+    def manage_mailbox(args: dict[str, Any]) -> dict[str, Any]:
+        handle, token = _handle(args), _string(args, "handle_token")
+        action, other = args.get("action"), _handle(args, "other")
+        try:
+            if action == "delete_from":
+                deleted = store.delete_mail_from(handle, token, other)
+                if deleted is None:
+                    raise ToolError(NOT_FOUND)
+                return {"deleted": deleted}
+            if action in ("block", "unblock"):
+                if not store.set_block(handle, token, other, blocked=action == "block", limits=mail_limits):
+                    raise ToolError(NOT_FOUND)
+                return {"handle": other, "blocked": action == "block"}
+        except MailRefused as exc:
+            raise ToolError(str(exc)) from None
+        raise ToolError("invalid arguments: 'action' must be 'delete_from', 'block' or 'unblock'")
 
     profile_schema = _schema(ProfileIn)
     profile_schema["properties"] = {"handle": HANDLE_ARG, **profile_schema["properties"]}
@@ -406,6 +423,25 @@ def build_tools(settings: Settings, store: Store, capabilities: dict[str, Any]) 
             ),
             False,
             read_mailbox,
+        ),
+        Tool(
+            "manage_mailbox",
+            "Block a sender or clear its messages",
+            "Keep your mailbox under control: 'delete_from' deletes every message you received from the handle "
+            "'other', 'block' stops it from messaging you, 'unblock' lifts that. "
+            'Example: {"handle": "orion", "handle_token": "...", "action": "block", '
+            '"other": "spammer"}.',
+            _object(
+                {
+                    "handle": HANDLE_ARG,
+                    "handle_token": HANDLE_TOKEN_ARG,
+                    "action": {"type": "string", "enum": ["delete_from", "block", "unblock"]},
+                    "other": HANDLE_ARG,
+                },
+                ["handle", "handle_token", "action", "other"],
+            ),
+            True,
+            manage_mailbox,
         ),
     ]
     return {t.name: t for t in tools}

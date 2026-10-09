@@ -137,6 +137,8 @@ class MailRefused(Exception):
 class MailLimits:
     max_mailbox: int = 500
     retention_days: int = 90
+    max_per_sender: int = 50
+    max_blocks: int = 1000
 
 
 def now() -> str:
@@ -167,6 +169,7 @@ class Store:
 
     def __init__(self, path: Path, on_event: EventHook = _no_events) -> None:
         self._on_event = on_event
+        self._last_mail_purge = -1e9
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
@@ -502,6 +505,14 @@ class Store:
         self._on_event("directory.published", handle=view["handle"], preview=profile["summary"])
         return view, new_token
 
+    def _purge_old_mail(self, limits: MailLimits) -> None:
+        """Delete mail past its retention. Runs at most once a minute; the caller holds the lock."""
+        if time.monotonic() - self._last_mail_purge < 60:
+            return
+        self._last_mail_purge = time.monotonic()
+        cutoff = datetime.fromtimestamp(time.time() - limits.retention_days * 86400, UTC)
+        self._db.execute("DELETE FROM mail WHERE created_at < ?", (cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),))
+
     def get_profile(self, handle: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._db.execute(
@@ -528,7 +539,9 @@ class Store:
             reg = self._owns(handle, handle_token)
             if reg is None:
                 return False
-            self._db.execute("DELETE FROM profiles WHERE skeleton = ?", (reg["skeleton"],))
+            # A profile hidden by the operator stays as a hidden row, so deleting and republishing it does not
+            # undo the moderation.
+            self._db.execute("DELETE FROM profiles WHERE skeleton = ? AND hidden_reason IS NULL", (reg["skeleton"],))
             return True
 
     def list_profiles_admin(self, limit: int) -> list[dict[str, Any]]:
@@ -564,11 +577,13 @@ class Store:
     ) -> dict[str, Any]:
         """Insert one message. Must run inside `_tx`."""
         ts = now()
-        cutoff = datetime.fromtimestamp(time.time() - limits.retention_days * 86400, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        self._db.execute("DELETE FROM mail WHERE created_at < ?", (cutoff,))
-        (count,) = self._db.execute(
-            "SELECT COUNT(*) FROM mail WHERE recipient_key = ?", (recipient["skeleton"],)
+        self._purge_old_mail(limits)
+        (count, from_sender) = self._db.execute(
+            "SELECT COUNT(*), COALESCE(SUM(sender_key = ?), 0) FROM mail WHERE recipient_key = ?",
+            (sender_key, recipient["skeleton"]),
         ).fetchone()
+        if from_sender >= limits.max_per_sender:
+            raise MailRefused("you have too many messages waiting in this mailbox; wait for the recipient", 409)
         if count >= limits.max_mailbox:
             raise MailRefused("the recipient's mailbox is full; try again later", 409)
         cur = self._db.execute(
@@ -621,13 +636,14 @@ class Store:
         return view, new_token
 
     def read_mailbox(
-        self, handle: str, handle_token: str, box: str, after: int, limit: int
+        self, handle: str, handle_token: str, box: str, after: int, limit: int, limits: MailLimits
     ) -> list[dict[str, Any]] | None:
         column = "recipient_key" if box == "in" else "sender_key"
         with self._lock:
             reg = self._owns(handle, handle_token)
             if reg is None:
                 return None
+            self._purge_old_mail(limits)
             rows = self._db.execute(
                 f"SELECT * FROM mail WHERE {column} = ? AND id > ? ORDER BY id LIMIT ?",  # noqa: S608
                 (reg["skeleton"], after, limit),
@@ -643,12 +659,29 @@ class Store:
             cur = self._db.execute("DELETE FROM mail WHERE id = ? AND recipient_key = ?", (mail_id, reg["skeleton"]))
             return cur.rowcount > 0
 
-    def set_block(self, handle: str, handle_token: str, other: str, blocked: bool) -> bool:
+    def delete_mail_from(self, handle: str, handle_token: str, sender: str) -> int | None:
+        """Delete every received message from `sender`. Returns how many, or None on a wrong handle or token."""
+        with self._tx():
+            reg = self._owns(handle, handle_token)
+            if reg is None:
+                return None
+            cur = self._db.execute(
+                "DELETE FROM mail WHERE recipient_key = ? AND sender_key = ?",
+                (reg["skeleton"], handles.skeleton(sender)),
+            )
+            return cur.rowcount
+
+    def set_block(self, handle: str, handle_token: str, other: str, blocked: bool, limits: MailLimits) -> bool:
         with self._tx():
             reg = self._owns(handle, handle_token)
             if reg is None:
                 return False
             if blocked:
+                (count,) = self._db.execute(
+                    "SELECT COUNT(*) FROM mail_blocks WHERE owner_key = ?", (reg["skeleton"],)
+                ).fetchone()
+                if count >= limits.max_blocks:
+                    raise MailRefused(f"at most {limits.max_blocks} blocked handles", 409)
                 self._db.execute(
                     "INSERT OR IGNORE INTO mail_blocks (owner_key, blocked_key, created_at) VALUES (?, ?, ?)",
                     (reg["skeleton"], handles.skeleton(other), now()),

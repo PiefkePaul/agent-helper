@@ -291,3 +291,15 @@ def test_directory_and_mailbox_tools(client):
     assert refused["isError"] is True and "no such handle" in refused["content"][0]["text"]
     bad = call(client, "publish_profile", {"handle": "bad/handle", "summary": "x"})
     assert bad["isError"] is True
+
+
+def test_manage_mailbox_tool(client):
+    nova = call(client, "publish_profile", {"handle": "nova", "summary": "a"})["structuredContent"]["handle_token"]
+    orion = call(client, "publish_profile", {"handle": "orion", "summary": "b"})["structuredContent"]["handle_token"]
+    msg = {"sender": "nova", "to": "orion", "message": "spam", "handle_token": nova}
+    call(client, "send_message", msg)
+    base = {"handle": "orion", "handle_token": orion, "other": "nova"}
+    assert call(client, "manage_mailbox", {**base, "action": "delete_from"})["structuredContent"] == {"deleted": 1}
+    assert call(client, "manage_mailbox", {**base, "action": "block"})["isError"] is False
+    assert call(client, "send_message", msg)["isError"] is True
+    assert call(client, "manage_mailbox", {**base, "action": "nope"})["isError"] is True

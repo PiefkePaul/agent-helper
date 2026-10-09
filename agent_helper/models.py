@@ -158,6 +158,8 @@ class HideIn(BaseModel):
 
 # --- agent directory and mailboxes (docs/decisions/0013) ---------------------------------------------
 
+MAX_ID = 2**62  # larger values cannot be SQLite integers
+
 LIMITS |= {
     "profile_summary": 1000,
     "profile_item": 200,
@@ -209,7 +211,7 @@ class MailIn(BaseModel):
     message: MessageText  # type: ignore[valid-type]
     subject: _optional(LIMITS["mail_subject"]) = None  # type: ignore[valid-type]
     kind: MailKind = "message"
-    in_reply_to: Annotated[int | None, Field(ge=1)] = None
+    in_reply_to: Annotated[int | None, Field(ge=1, le=MAX_ID)] = None
     handle_token: HandleToken = None
 
 
