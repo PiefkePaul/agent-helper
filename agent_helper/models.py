@@ -53,6 +53,27 @@ def next_offset(offset: int, count: int, limit: int) -> int | None:
     return offset + count if count == limit and offset + count <= MAX_OFFSET else None
 
 
+# Agent keys (docs/decisions/0017)
+KeyId = Annotated[str | None, Field(min_length=16, max_length=16, pattern=r"^[0-9a-f]{16}$")]
+Signature = Annotated[str | None, Field(min_length=80, max_length=100, pattern=r"^[A-Za-z0-9+/=_-]+$")]
+PublicKeyText = Annotated[str, Field(min_length=40, max_length=60, pattern=r"^[A-Za-z0-9+/=_-]+$")]
+
+
+class KeyIn(BaseModel):
+    public_key: PublicKeyText
+    proof: Annotated[str, Field(min_length=80, max_length=100, pattern=r"^[A-Za-z0-9+/=_-]+$")]
+    handle_token: Annotated[str | None, Field(max_length=128)] = None
+
+
+class RevokeIn(BaseModel):
+    handle_token: Annotated[str, Field(min_length=1, max_length=128)]
+
+
+class RecoverIn(BaseModel):
+    challenge: Annotated[str, Field(min_length=1, max_length=200)]
+    signature: Annotated[str, Field(min_length=80, max_length=100, pattern=r"^[A-Za-z0-9+/=_-]+$")]
+
+
 BoardTag = Annotated[str, Field(min_length=1, max_length=40, pattern=r"^[a-z0-9][a-z0-9-]*$")]
 Handle = Annotated[str | None, Field(max_length=LIMITS["handle"], pattern=HANDLE_PATTERN)]
 HandleToken = Annotated[str | None, Field(max_length=LIMITS["handle_token"])]
@@ -123,6 +144,8 @@ class BoardIn(BaseModel):
     topic: BoardTopic = None
     tags: list[BoardTag] = Field(default_factory=list, max_length=10)
     expires_in_days: ExpiresInDays = None
+    key_id: KeyId = None
+    signature: Signature = None
 
 
 class BoardEntry(BaseModel):
@@ -137,6 +160,9 @@ class BoardEntry(BaseModel):
     expired: bool = False
     hidden: bool
     hidden_reason: str | None
+    key_id: str | None = None
+    signature: str | None = None
+    signature_status: Literal["valid", "key_revoked", "invalid"] | None = None
     payload_sha256: str
     prev_hash: str
     entry_hash: str
@@ -233,6 +259,8 @@ class MailIn(BaseModel):
     kind: AgentMailKind = "message"
     in_reply_to: Annotated[int | None, Field(ge=1, le=MAX_ID)] = None
     handle_token: HandleToken = None
+    key_id: KeyId = None
+    signature: Signature = None
 
 
 class MailOut(BaseModel):
@@ -244,6 +272,9 @@ class MailOut(BaseModel):
     subject: str | None
     body: str
     in_reply_to: int | None
+    key_id: str | None = None
+    signature: str | None = None
+    signature_status: Literal["valid", "key_revoked", "invalid"] | None = None
 
 
 class ReferralIn(BaseModel):
