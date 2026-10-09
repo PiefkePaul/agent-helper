@@ -18,6 +18,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -53,6 +54,8 @@ MAX_QUEUE = 5_000
 WORKERS = 8  # one slow name server or endpoint must not hold up everyone else
 MAX_REQUEST_BYTES = 128 * 1024
 MAX_OPT_OUTS = 100_000
+EVENT_ID = re.compile(r"^evt_[0-9a-f]{24}$")
+SIGNATURE = re.compile(r"^sha256=[0-9a-f]{64}$")
 OUTCOMES = ("delivered", "failed", "tls_failure", "opted_out", "refused", "capped")
 
 
@@ -61,6 +64,18 @@ def sign(secret: str, timestamp: str, nonce: str, method: str, path: str, body: 
     a repeated signature is always a replay."""
     message = f"{timestamp}.{nonce}.{method.upper()}.{path}.".encode() + body
     return "sha256=" + hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
+
+
+def notice_headers(job: dict[str, Any]) -> dict[str, str]:
+    """The only headers the relay ever sends. Jobs carry values, never header names, so a compromised or
+    buggy service cannot make the relay send arbitrary headers."""
+    return {
+        "Content-Type": "application/json",
+        "User-Agent": "agent-helper-push",
+        "X-Agent-Helper-Event-Id": job["event_id"],
+        "X-Agent-Helper-Timestamp": job["timestamp"],
+        "X-Agent-Helper-Signature": job["signature"],
+    }
 
 
 @dataclass(frozen=True)
@@ -241,7 +256,7 @@ class Sender:
                 deny_domains=self.settings.deny_domains,
                 allow_domains=self.settings.allowed_domains if self.settings.mode == "allowlist" else None,
             )
-            if kind == "verify" and dest.host in self._optout:
+            if dest.host in self._optout:  # every kind of job, not only verifications
                 raise DestinationRefused("host opted out")
         except DestinationRefused as exc:
             log.info("push refused: %s", exc)
@@ -264,7 +279,7 @@ class Sender:
         body = job["body"].encode() if isinstance(job["body"], str) else bytes(job["body"])
         attempt = Attempt(status=None)
         for address in addresses[:4]:  # resolver order; the next one only if this one did not answer
-            attempt = self.post(dest, address, dict(job.get("headers", {})), body)
+            attempt = self.post(dest, address, notice_headers(job), body)
             if attempt.status is not None or attempt.tls_failure:
                 break
         if attempt.tls_failure:
@@ -380,8 +395,13 @@ def create_relay_app(settings: RelaySettings, sender: Sender | None = None) -> F
                 and isinstance(job.get("url"), str)
                 and isinstance(job.get("body"), str)
                 and len(job["body"]) <= 1024
-                and isinstance(job.get("headers"), dict)
-                and all(isinstance(k, str) and isinstance(v, str) for k, v in job["headers"].items())
+                and isinstance(job.get("event_id"), str)
+                and EVENT_ID.match(job["event_id"])
+                and isinstance(job.get("timestamp"), str)
+                and job["timestamp"].isdigit()
+                and len(job["timestamp"]) <= 12
+                and isinstance(job.get("signature"), str)
+                and SIGNATURE.match(job["signature"])
             ):
                 raise HTTPException(400, "invalid job")
             valid.append(job)

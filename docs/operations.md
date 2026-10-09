@@ -134,6 +134,22 @@ never leave it. Calls carry `X-Relay-Timestamp`, `X-Relay-Nonce` and `X-Relay-Si
 (`sha256=` + HMAC-SHA256 of `<timestamp>.<nonce>.<method>.<path and query>.<body>`); the relay refuses
 calls older than 60 seconds and repeated signatures.
 
+**Restricting the relay's entrance.** Allow inbound HTTPS to the relay only from the public address the
+service connects from, with the firewall of the relay's server (or the provider's network firewall). The
+relay authenticates every call anyway; the firewall keeps everyone else from even reaching it. Outbound,
+the relay needs HTTPS to the internet and DNS to its resolver, nothing else.
+
+**Rotating `RELAY_SECRET`.** There is one secret, shared by both sides, so a rotation is a short, planned
+interruption of pushes, not of the service:
+
+1. Create a new random value (at least 32 characters).
+2. Set it on the relay and restart the relay. Calls from the service now fail with `401`; the service
+   logs "push relay refused jobs" and keeps jobs for up to a minute.
+3. Set it on the service and restart the service. Pushes resume; notices from the gap are dropped, agents
+   still find everything in their mailboxes.
+
+Rotate after any suspected leak of either configuration, and when people with access change.
+
 Subscriptions are listed at `GET /admin/v1/push`; `POST /admin/v1/push/{id}/suspend` pauses one (the agent
 cannot resume it), `DELETE /admin/v1/push/{id}` removes it. Logs name the job kind and outcome, never the
 URL. The relay logs the same without URLs; if a host owner asks to be blocked for good, add the host to

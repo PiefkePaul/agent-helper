@@ -18,6 +18,7 @@ import json
 import logging
 import queue
 import secrets
+import socket
 import ssl
 import threading
 import time
@@ -62,14 +63,16 @@ def signed_job(kind: str, url: str, secret: str, payload: dict[str, Any]) -> dic
     if len(body) > MAX_BODY:
         raise ValueError("notice body too large")
     timestamp = str(int(time.time()))
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "agent-helper-push",
-        "X-Agent-Helper-Event-Id": event_id,
-        "X-Agent-Helper-Timestamp": timestamp,
-        "X-Agent-Helper-Signature": notice_signature(secret, timestamp, event_id, body.encode()),
+    # Only the values; the relay builds the request headers itself (it accepts no headers from jobs).
+    return {
+        "job_id": "job_" + secrets.token_hex(12),
+        "kind": kind,
+        "url": url,
+        "body": body,
+        "event_id": event_id,
+        "timestamp": timestamp,
+        "signature": notice_signature(secret, timestamp, event_id, body.encode()),
     }
-    return {"job_id": "job_" + secrets.token_hex(12), "kind": kind, "url": url, "headers": headers, "body": body}
 
 
 class RelayTransport(Protocol):
@@ -100,12 +103,32 @@ class HttpsRelay:
             "X-Relay-Signature": sign(self.secret, timestamp, nonce, method, full, body),
         }
         conn = http.client.HTTPSConnection(self.host, self.port, timeout=self.timeout, context=self.context)
-        try:
-            conn.request(method, full, body=body if method != "GET" else None, headers=headers)
-            response = conn.getresponse()
-            return response.status, response.read(1_000_000)
-        finally:
+        result: list[tuple[int, bytes] | BaseException] = []
+
+        def run() -> None:
+            try:
+                conn.request(method, full, body=body if method != "GET" else None, headers=headers)
+                response = conn.getresponse()
+                result.append((response.status, response.read(1_000_000)))
+            except BaseException as exc:  # noqa: BLE001 (handed to the caller)
+                result.append(exc)
+
+        # One deadline for the whole call: a relay that trickles bytes must not hold up the push thread.
+        worker = threading.Thread(target=run, name="agent-helper-relay-call", daemon=True)
+        worker.start()
+        worker.join(self.timeout)
+        if not result:
+            if conn.sock is not None:
+                try:
+                    conn.sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
             conn.close()
+            raise TimeoutError("relay call exceeded its deadline")
+        conn.close()
+        if isinstance(result[0], BaseException):
+            raise result[0]
+        return result[0]
 
 
 class PushManager:

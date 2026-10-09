@@ -279,7 +279,15 @@ def _sender(tmp_path, *results: Attempt, resolver=None, **settings) -> tuple[Sen
 
 
 def _job(n: int = 1, kind: str = "notice", url: str = "https://hooks.example.com/in") -> dict:
-    return {"job_id": f"job_{n}", "kind": kind, "url": url, "headers": {"X-A": "1"}, "body": "{}"}
+    return {
+        "job_id": f"job_{n}",
+        "kind": kind,
+        "url": url,
+        "body": "{}",
+        "event_id": "evt_" + "a" * 24,
+        "timestamp": "1700000000",
+        "signature": "sha256=" + "b" * 64,
+    }
 
 
 def _outcomes(sender: Sender) -> dict[str, str]:
@@ -292,7 +300,55 @@ def test_sender_delivers_to_the_resolved_address(tmp_path):
     sender.run_due()
     assert _outcomes(sender) == {"job_1": "delivered"}
     dest, address, headers, body = post.calls[0]
-    assert (dest.host, address, headers, body) == ("hooks.example.com", PUBLIC_V4, {"X-A": "1"}, b"{}")
+    assert (dest.host, address, body) == ("hooks.example.com", PUBLIC_V4, b"{}")
+    assert headers == {
+        "Content-Type": "application/json",
+        "User-Agent": "agent-helper-push",
+        "X-Agent-Helper-Event-Id": "evt_" + "a" * 24,
+        "X-Agent-Helper-Timestamp": "1700000000",
+        "X-Agent-Helper-Signature": "sha256=" + "b" * 64,
+    }
+
+
+def test_relay_never_sends_headers_from_jobs(tmp_path):
+    client, sender = _relay_client(tmp_path)
+    job = _job() | {"headers": {"Authorization": "Bearer stolen", "Host": "internal"}}
+    body = json.dumps({"jobs": [job]}).encode()
+    signed = _signed("POST", "/v1/relay/jobs", body)
+    assert client.post("/v1/relay/jobs", content=body, headers=signed).status_code == 200
+    sender.run_due()
+    sent = sender.post.calls[0][2]
+    assert "Authorization" not in sent and "Host" not in sent
+    for bad in ({"event_id": "evt_x\r\nX: y"}, {"timestamp": "12a"}, {"signature": "sha256=zz"}):
+        body = json.dumps({"jobs": [_job() | bad]}).encode()
+        assert (
+            client.post("/v1/relay/jobs", content=body, headers=_signed("POST", "/v1/relay/jobs", body)).status_code
+            == 400
+        )
+
+
+def test_opt_out_stops_notices_too(tmp_path):
+    sender, post, _ = _sender(tmp_path, Attempt(status=410))
+    sender.submit([_job(1, kind="verify")])
+    sender.run_due()
+    sender.submit([_job(2)])
+    sender.run_due()
+    assert len(post.calls) == 1
+    assert _outcomes(sender)["job_2"] == "opted_out"
+
+
+def test_relay_calls_have_an_overall_deadline(tmp_path):
+    from agent_helper.push import HttpsRelay
+
+    cert, key = _self_signed(tmp_path, "relay.example.com")
+    server = _TLSServer(cert, key, None)  # accepts, reads, never answers
+    relay = HttpsRelay(f"https://relay.example.com:{server.port}", RELAY_SECRET, str(cert), timeout=0.5)
+    relay.host = "127.0.0.1"  # the certificate check still uses the name below
+    relay.context.check_hostname = False
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        relay.call("GET", "/v1/relay/outcomes?after=0", b"")
+    assert time.monotonic() - started < 2
 
 
 def test_sender_retries_after_30_s_and_3_min_then_gives_up(tmp_path):

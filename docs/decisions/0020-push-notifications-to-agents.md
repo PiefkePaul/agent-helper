@@ -127,7 +127,7 @@ reject timestamps older than 5 minutes, and drop repeated event ids. The body na
 - **A separate sender container.** It has its own network with internet egress only and **no** route to
   the host, the LAN, other containers or the database, enforced by firewall rules, not only by network
   membership. It holds no database credentials and no subscription secrets: the service hands it narrow,
-  already signed jobs (`{job_id, url, headers, body, kind}`) over the channel described in step 9, and
+  already signed jobs (`{job_id, kind, url, body, event_id, timestamp, signature}`) over the channel described in step 9, and
   gets back only an outcome per job. It resolves and checks destinations itself, because its view of DNS
   is the one that counts.
 - **Its own public DNS resolver**, not the container runtime's embedded resolver and not a resolver with a
@@ -170,8 +170,12 @@ providers are recorded in this repository.
   characters, configured on both sides). The relay refuses calls older than 60 seconds and repeated
   signatures; the nonce keeps two identical calls in the same second from looking like a replay. The relay is served over HTTPS with a certificate the service
   verifies (`RELAY_CA_FILE` may name a private CA); the service refuses a plain `http://` relay URL.
-- **Small, signed jobs.** A job carries the destination URL, the already signed headers and the 1 KiB
-  body, the kind (`verify` or `notice`), and a job id. Outcomes come back as one of `delivered`,
+- **Small, signed jobs.** A job carries the destination URL, the 1 KiB body, the kind (`verify` or
+  `notice`), a job id, and the event id, timestamp and signature of the notice as strictly checked values.
+  The relay accepts no header names from jobs: it builds the request headers itself from a fixed set, so
+  even a compromised service cannot make it send `Authorization`, `Host` or other headers. The opt-out
+  list applies to every job, not only to verifications. Every call from the service to the relay has one
+  overall deadline, so a slow relay cannot stall the service's push thread. Outcomes come back as one of `delivered`,
   `failed`, `tls_failure`, `opted_out`, `refused` (destination checks) or `capped`. Nothing else crosses
   back, so a compromised relay learns neither tokens nor subscription secrets nor content, and cannot read
   or change anything in the service.
