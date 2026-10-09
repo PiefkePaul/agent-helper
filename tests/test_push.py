@@ -1002,3 +1002,108 @@ def test_admin_can_list_suspend_and_delete(pushing, admin_headers):
     assert client.post("/v1/handles/nova/push/renew", headers=auth).status_code == 409
     assert client.delete(f"/admin/v1/push/{sub_id}", headers=admin_headers).status_code == 204
     assert client.get("/admin/v1/push").status_code == 401
+
+
+# --- relay: which addresses may call it -----------------------------------------------------------
+
+
+def test_client_filter_with_networks_and_a_dynamic_name():
+    from agent_helper.relay import ClientFilter
+
+    answers = {"home.example.net": ["93.184.215.14"]}
+    clock = FakeClock()
+    flt = ClientFilter(("198.51.100.0/24", "home.example.net"), resolver=lambda h, p: answers[h], clock=clock)
+    flt.refresh_if_stale()
+    assert flt.allows("198.51.100.7") and flt.allows("93.184.215.14") and flt.allows("::ffff:93.184.215.14")
+    assert not flt.allows("93.184.215.15") and not flt.allows("127.0.0.1") and not flt.allows(None)
+    answers["home.example.net"] = ["93.184.215.99"]  # the dynamic address changed
+    clock.now += 299
+    flt.refresh_if_stale()
+    assert flt.allows("93.184.215.14")  # not refreshed yet
+    clock.now += 1
+    flt.refresh_if_stale()
+    assert flt.allows("93.184.215.99") and not flt.allows("93.184.215.14")
+
+
+def test_client_filter_keeps_the_last_addresses_for_a_while_only():
+    from agent_helper.relay import ClientFilter
+
+    clock, up = FakeClock(), {"ok": True}
+
+    def resolver(host, port):
+        if not up["ok"]:
+            raise OSError("no answer")
+        return ["93.184.215.14"]
+
+    flt = ClientFilter(("home.example.net",), resolver=resolver, clock=clock, refresh=300, max_stale=3600)
+    flt.refresh_if_stale()
+    up["ok"] = False
+    clock.now += 1800
+    flt.refresh_if_stale()
+    assert flt.allows("93.184.215.14")  # last known, still within max_stale
+    clock.now += 1801
+    flt.refresh_if_stale()
+    assert not flt.allows("93.184.215.14")  # too old: nobody is admitted through the name
+
+
+def test_client_filter_refuses_everyone_when_nothing_resolves():
+    from agent_helper.relay import ClientFilter
+
+    def broken(host, port):
+        raise OSError("no answer")
+
+    flt = ClientFilter(("home.example.net",), resolver=broken)
+    flt.refresh_if_stale()
+    assert not flt.allows("93.184.215.14")
+    with pytest.raises(SystemExit):
+        ClientFilter(("not a name!",))
+
+
+def test_relay_answers_only_allowed_clients_and_ignores_forwarded_headers(tmp_path):
+    from agent_helper.relay import ClientFilter
+
+    sender, _, _ = _sender(tmp_path)
+    settings = RelaySettings(secret=RELAY_SECRET, data_dir=tmp_path / "relay")
+    app = create_relay_app(settings, sender, ClientFilter(("198.51.100.0/24",)))
+    body = json.dumps({"jobs": [_job()]}).encode()
+    stranger = TestClient(app, client=("203.0.113.9", 40000))
+    spoofed = {"X-Forwarded-For": "198.51.100.7", "X-Real-IP": "198.51.100.7"}
+    r = stranger.post("/v1/relay/jobs", content=body, headers=_signed("POST", "/v1/relay/jobs", body) | spoofed)
+    assert r.status_code == 404
+    assert stranger.get("/healthz").status_code == 404
+    service = TestClient(app, client=("198.51.100.7", 40000))
+    r = service.post("/v1/relay/jobs", content=body, headers=_signed("POST", "/v1/relay/jobs", body))
+    assert r.status_code == 200
+
+
+def test_without_the_setting_any_client_may_call(tmp_path):
+    client, _ = _relay_client(tmp_path)  # RELAY_ALLOWED_CLIENTS not set
+    assert client.get("/healthz").status_code == 200
+
+
+def test_relay_settings_read_the_client_list(monkeypatch):
+    monkeypatch.setenv("RELAY_ALLOWED_CLIENTS", "198.51.100.0/24, home.example.net")
+    monkeypatch.setenv("RELAY_ALLOWED_CLIENTS_MAX_STALE", "600")
+    settings = RelaySettings.from_env()
+    assert settings.allowed_clients == ("198.51.100.0/24", "home.example.net")
+    assert settings.allowed_clients_max_stale == 600
+
+
+def test_one_failing_name_does_not_take_the_others_down():
+    from agent_helper.relay import ClientFilter
+
+    clock = FakeClock()
+    working = {"a.example.net": True, "b.example.net": True}
+
+    def resolver(host, port):
+        if not working[host]:
+            raise OSError("no answer")
+        return ["93.184.215.14"] if host == "a.example.net" else ["93.184.215.20"]
+
+    flt = ClientFilter(("a.example.net", "b.example.net"), resolver=resolver, clock=clock, max_stale=3600)
+    flt.refresh_if_stale()
+    working["b.example.net"] = False
+    clock.now += 3601
+    flt.refresh_if_stale()
+    assert flt.allows("93.184.215.14")  # a still resolves
+    assert not flt.allows("93.184.215.20")  # b failed for longer than max_stale

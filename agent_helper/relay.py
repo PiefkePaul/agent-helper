@@ -28,6 +28,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from . import __version__
 from .config import MIN_ADMIN_SECRET_LENGTH, parse_networks
@@ -182,6 +183,8 @@ class RelaySettings:
     per_destination_per_minute: int = 30
     data_dir: Path = Path("./relay-data")
     log_level: str = "info"
+    allowed_clients: tuple[str, ...] = ()  # CIDRs and host names; empty: any client (the HMAC still applies)
+    allowed_clients_max_stale: float = 3600.0
 
     @classmethod
     def from_env(cls) -> RelaySettings:
@@ -201,7 +204,96 @@ class RelaySettings:
             max_per_minute=int(os.environ.get("PUSH_MAX_PER_MIN", "120")),
             data_dir=Path(os.environ.get("RELAY_DATA_DIR", "./relay-data")),
             log_level=os.environ.get("LOG_LEVEL", "info"),
+            allowed_clients=parse_list(os.environ.get("RELAY_ALLOWED_CLIENTS", "")),
+            allowed_clients_max_stale=float(os.environ.get("RELAY_ALLOWED_CLIENTS_MAX_STALE", "3600")),
         )
+
+
+HOST_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\.?")
+
+
+class ClientFilter:
+    """Which addresses may call the relay at all (RELAY_ALLOWED_CLIENTS), checked before anything else.
+
+    Entries are CIDRs or host names. Host names are for a service whose public address changes (a dynamic
+    DNS name): they are resolved again every `refresh` seconds. A failed lookup keeps the last known
+    addresses for at most `max_stale` seconds; after that, and whenever nothing is known, only the CIDRs
+    admit anyone. The address checked is always the TCP peer, never a forwarded header. A second layer
+    behind the server's firewall, which stays the primary control (docs/decisions/0020)."""
+
+    def __init__(
+        self,
+        entries: tuple[str, ...],
+        resolver: Resolver = system_resolver,
+        clock: Callable[[], float] = time.monotonic,
+        refresh: float = 300.0,
+        max_stale: float = 3600.0,
+    ) -> None:
+        self.nets: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+        self.hosts: list[str] = []
+        for entry in entries:
+            try:
+                self.nets.append(ipaddress.ip_network(entry, strict=False))
+            except ValueError:
+                name = entry.lower()
+                if not HOST_NAME.fullmatch(name):
+                    raise SystemExit(f"RELAY_ALLOWED_CLIENTS: not a network or host name: {entry[:60]!r}") from None
+                self.hosts.append(name.rstrip("."))
+        self.resolver, self.clock, self.refresh, self.max_stale = resolver, clock, refresh, max_stale
+        # Per host name: its last known addresses and when it last resolved, so one failing name does not
+        # take the others down with it.
+        self._resolved: dict[str, tuple[set[ipaddress.IPv4Address | ipaddress.IPv6Address], float]] = {}
+        self._tried_at = -1e18
+        self._warned_private = False
+        self._lock = threading.Lock()
+
+    @property
+    def active(self) -> bool:
+        return bool(self.nets or self.hosts)
+
+    def refresh_if_stale(self) -> None:
+        now = self.clock()
+        with self._lock:
+            if not self.hosts or now - self._tried_at < self.refresh:
+                return
+            self._tried_at = now  # under the lock: concurrent requests start one round of lookups, not many
+        for host in self.hosts:
+            try:
+                found = {ipaddress.ip_address(a.split("%")[0]) for a in self.resolver(host, 443)}
+            except (OSError, ValueError):
+                with self._lock:
+                    _, at = self._resolved.get(host, (set(), -1e18))
+                    stale = now - at > self.max_stale
+                log.warning(
+                    "RELAY_ALLOWED_CLIENTS: lookup of one name failed; %s",
+                    "it admits nobody until a lookup works" if stale else "keeping its last known addresses for now",
+                )
+                continue
+            with self._lock:
+                self._resolved[host] = (found, now)
+
+    def allows(self, raw: str | None) -> bool:
+        if not self.active:
+            return True
+        try:
+            addr = ipaddress.ip_address(raw or "")
+        except ValueError:
+            return False
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+            addr = addr.ipv4_mapped
+        if any(addr in net for net in self.nets if net.version == addr.version):
+            return True
+        now = self.clock()
+        with self._lock:
+            if any(addr in found and now - at <= self.max_stale for found, at in self._resolved.values()):
+                return True
+        if not addr.is_global and not self._warned_private:
+            # A private or loopback peer usually means a proxy or Docker's userland proxy in front: then every
+            # call shares that address, so the filter refuses them all. Restrict in front of the relay instead,
+            # or publish the port without the userland proxy so the real peer arrives.
+            self._warned_private = True
+            log.warning("RELAY_ALLOWED_CLIENTS: a call came from a private address; is a proxy in front?")
+        return False
 
 
 def registrable_domain(host: str) -> str:
@@ -436,13 +528,28 @@ class _SeenSignatures:
             return True
 
 
-def create_relay_app(settings: RelaySettings, sender: Sender | None = None) -> FastAPI:
+def create_relay_app(
+    settings: RelaySettings, sender: Sender | None = None, clients: ClientFilter | None = None
+) -> FastAPI:
     if len(settings.secret) < MIN_ADMIN_SECRET_LENGTH:
         raise SystemExit(f"RELAY_SECRET must be at least {MIN_ADMIN_SECRET_LENGTH} characters")
     sender = sender or Sender(settings)
+    clients = clients or ClientFilter(settings.allowed_clients, max_stale=settings.allowed_clients_max_stale)
+    if not clients.active:
+        log.warning("RELAY_ALLOWED_CLIENTS is empty: any address may call the relay (calls still need the HMAC)")
     seen = _SeenSignatures()
     app = FastAPI(title="agent-helper relay", version=__version__, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.sender = sender
+    app.state.clients = clients
+
+    @app.middleware("http")
+    async def only_allowed_clients(request: Request, call_next: Callable[..., Any]) -> Any:
+        # Before authentication, so strangers learn nothing and cost nothing. The address is the direct
+        # peer: behind a proxy, restrict in the proxy (or its firewall) instead.
+        await run_in_threadpool(clients.refresh_if_stale)
+        if not clients.allows(request.client.host if request.client else None):
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        return await call_next(request)
 
     async def authenticate(request: Request) -> bytes:
         timestamp = request.headers.get("x-relay-timestamp", "")
