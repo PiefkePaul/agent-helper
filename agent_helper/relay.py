@@ -54,8 +54,22 @@ MAX_QUEUE = 5_000
 WORKERS = 8  # one slow name server or endpoint must not hold up everyone else
 MAX_REQUEST_BYTES = 128 * 1024
 MAX_OPT_OUTS = 100_000
-EVENT_ID = re.compile(r"^evt_[0-9a-f]{24}$")
-SIGNATURE = re.compile(r"^sha256=[0-9a-f]{64}$")
+# Checked with fullmatch: no trailing newline, no Unicode digits or letters (explicit ASCII classes).
+EVENT_ID = re.compile(r"evt_[0-9a-f]{24}")
+SIGNATURE = re.compile(r"sha256=[0-9a-f]{64}")
+TIMESTAMP = re.compile(r"[0-9]{1,12}")
+NONCE = re.compile(r"[0-9A-Za-z_-]{16,64}")
+JOB_ID = re.compile(r"[0-9A-Za-z_-]{1,64}")
+UTC_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+SHORT_TEXT = re.compile(r"[\x20-\x7e]{1,600}")  # printable ASCII only
+PUSH_EVENT_TYPES = ("request.reply", "mail.received", "referral.received")
+# Exactly these fields per notice type: the relay sends nothing but what the design allows.
+BODY_FIELDS = {
+    "push.verify": {"type", "event_id", "time", "handle", "instance", "code", "about", "confirm"},
+    "notice": {"type", "event_id", "time", "handle", "instance", "count", "events"},
+    "subscription.expiring": {"type", "event_id", "time", "handle", "instance", "expires_at"},
+}
+BODY_KIND = {"push.verify": "verify", "notice": "notice", "subscription.expiring": "notice"}
 OUTCOMES = ("delivered", "failed", "tls_failure", "opted_out", "refused", "capped")
 
 
@@ -64,6 +78,55 @@ def sign(secret: str, timestamp: str, nonce: str, method: str, path: str, body: 
     a repeated signature is always a replay."""
     message = f"{timestamp}.{nonce}.{method.upper()}.{path}.".encode() + body
     return "sha256=" + hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
+
+
+def _matches(pattern: re.Pattern[str], value: Any) -> bool:
+    return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def _short(value: Any) -> bool:
+    return _matches(SHORT_TEXT, value)
+
+
+def valid_body(job: dict[str, Any]) -> bool:
+    """The notice body is JSON with a fixed set of fields for its type, matching the job. Anything else is
+    refused, so the relay cannot be used to send arbitrary content."""
+    raw = job.get("body")
+    if not isinstance(raw, str) or len(raw) > 1024 or not raw.isascii():
+        return False
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+    kind = body.get("type")
+    if kind not in BODY_FIELDS or set(body) != BODY_FIELDS[kind] or BODY_KIND[kind] != job.get("kind"):
+        return False
+    if body["event_id"] != job.get("event_id") or not _matches(UTC_TIME, body["time"]):
+        return False
+    if not (_short(body["handle"]) and len(body["handle"]) <= 64 and _short(body["instance"])):
+        return False
+    if kind == "push.verify":
+        return all(_short(body[k]) for k in ("code", "about", "confirm"))
+    if kind == "subscription.expiring":
+        return _matches(UTC_TIME, body["expires_at"])
+    events = body["events"]
+    count = body["count"]
+    return (
+        isinstance(count, int)
+        and not isinstance(count, bool)
+        and count >= 1
+        and isinstance(events, list)
+        and len(events) <= 10
+        and all(
+            isinstance(e, dict)
+            and set(e) == {"event", "id"}
+            and e["event"] in PUSH_EVENT_TYPES
+            and (_matches(JOB_ID, e["id"]) or (isinstance(e["id"], int) and not isinstance(e["id"], bool)))
+            for e in events
+        )
+    )
 
 
 def notice_headers(job: dict[str, Any]) -> dict[str, str]:
@@ -353,7 +416,7 @@ def create_relay_app(settings: RelaySettings, sender: Sender | None = None) -> F
         timestamp = request.headers.get("x-relay-timestamp", "")
         given = request.headers.get("x-relay-signature", "")
         nonce = request.headers.get("x-relay-nonce", "")
-        if not 16 <= len(nonce) <= 64 or not timestamp.isdigit() or len(given) != 71:
+        if not NONCE.fullmatch(nonce) or not TIMESTAMP.fullmatch(timestamp) or not SIGNATURE.fullmatch(given):
             raise HTTPException(401, "unauthorized")
         age = abs(time.time() - int(timestamp))
         if age > SIGNATURE_WINDOW_SECONDS:
@@ -390,18 +453,13 @@ def create_relay_app(settings: RelaySettings, sender: Sender | None = None) -> F
         for job in items:
             if not (
                 isinstance(job, dict)
-                and isinstance(job.get("job_id"), str)
+                and _matches(JOB_ID, job.get("job_id"))
                 and job.get("kind") in ("verify", "notice")
                 and isinstance(job.get("url"), str)
-                and isinstance(job.get("body"), str)
-                and len(job["body"]) <= 1024
-                and isinstance(job.get("event_id"), str)
-                and EVENT_ID.match(job["event_id"])
-                and isinstance(job.get("timestamp"), str)
-                and job["timestamp"].isdigit()
-                and len(job["timestamp"]) <= 12
-                and isinstance(job.get("signature"), str)
-                and SIGNATURE.match(job["signature"])
+                and _matches(EVENT_ID, job.get("event_id"))
+                and _matches(TIMESTAMP, job.get("timestamp"))
+                and _matches(SIGNATURE, job.get("signature"))
+                and valid_body(job)
             ):
                 raise HTTPException(400, "invalid job")
             valid.append(job)

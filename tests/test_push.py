@@ -278,12 +278,24 @@ def _sender(tmp_path, *results: Attempt, resolver=None, **settings) -> tuple[Sen
     return sender, post, clock
 
 
+def _body(kind: str = "notice", **changes) -> str:
+    common = {"event_id": EVT, "time": "2026-10-09T10:00:00Z", "handle": "nova", "instance": "ah-0123"}
+    if kind == "verify":
+        body = {"type": "push.verify", "code": "abc", "about": "a check", "confirm": "POST /v1/x"}
+    else:
+        body = {"type": "notice", "count": 1, "events": [{"event": "mail.received", "id": 7}]}
+    return json.dumps(common | body | changes)
+
+
+EVT = "evt_" + "a" * 24
+
+
 def _job(n: int = 1, kind: str = "notice", url: str = "https://hooks.example.com/in") -> dict:
     return {
         "job_id": f"job_{n}",
         "kind": kind,
         "url": url,
-        "body": "{}",
+        "body": _body(kind),
         "event_id": "evt_" + "a" * 24,
         "timestamp": "1700000000",
         "signature": "sha256=" + "b" * 64,
@@ -300,7 +312,7 @@ def test_sender_delivers_to_the_resolved_address(tmp_path):
     sender.run_due()
     assert _outcomes(sender) == {"job_1": "delivered"}
     dest, address, headers, body = post.calls[0]
-    assert (dest.host, address, body) == ("hooks.example.com", PUBLIC_V4, b"{}")
+    assert (dest.host, address, body) == ("hooks.example.com", PUBLIC_V4, _body().encode())
     assert headers == {
         "Content-Type": "application/json",
         "User-Agent": "agent-helper-push",
@@ -325,6 +337,59 @@ def test_relay_never_sends_headers_from_jobs(tmp_path):
             client.post("/v1/relay/jobs", content=body, headers=_signed("POST", "/v1/relay/jobs", body)).status_code
             == 400
         )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"event_id": EVT + "\n"},
+        {"timestamp": "1700000000\n"},
+        {"timestamp": "\u0661\u0662\u0663"},  # Arabic-Indic digits
+        {"signature": "sha256=" + "b" * 64 + "\n"},
+        {"job_id": "job\n"},
+        {"body": "not json"},
+        {"body": "[]"},
+        {"body": _body(extra="field")},
+        {"body": _body(event_id="evt_" + "c" * 24)},
+        {"body": _body(type="push.verify")},
+        {"body": _body(count=0)},
+        {"body": _body(count=True)},
+        {"body": _body(events=[{"event": "other", "id": 1}])},
+        {"body": _body(events=[{"event": "mail.received", "id": 1, "x": 2}])},
+        {"body": _body(handle="\u00e9")},
+        {"body": _body(time="yesterday")},
+        {"body": _body("verify")},  # a verification body in a notice job
+    ],
+)
+def test_relay_accepts_only_strict_jobs(tmp_path, changes):
+    client, _ = _relay_client(tmp_path)
+    body = json.dumps({"jobs": [_job() | changes]}).encode()
+    signed = _signed("POST", "/v1/relay/jobs", body)
+    assert client.post("/v1/relay/jobs", content=body, headers=signed).status_code == 400
+
+
+def test_relay_accepts_every_body_the_service_builds(pushing):
+    client, push, sender, clock = pushing
+    store = client.app.state.store
+    _verify(client, push, sender, _handle(client))
+    other = _handle(client, "orbit")
+    client.post("/v1/messages", json={"sender": "orbit", "to": "nova", "message": "x", "handle_token": other})
+    soon = (datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    store._db.execute("UPDATE push_subscriptions SET expires_at = ?", (soon,))
+    clock.now += 700
+    push.tick()
+    sender.run_due()
+    kinds = [json.loads(c[3])["type"] for c in sender.post.calls]
+    assert sorted(kinds) == ["notice", "push.verify", "subscription.expiring"]
+
+
+def test_relay_header_checks_are_strict(tmp_path):
+    client, _ = _relay_client(tmp_path)
+    body = json.dumps({"jobs": [_job()]}).encode()
+    for key, value in (("X-Relay-Timestamp", None), ("X-Relay-Nonce", "n" * 15)):
+        headers = _signed("POST", "/v1/relay/jobs", body)
+        headers[key] = value if value is not None else headers[key] + " "
+        assert client.post("/v1/relay/jobs", content=body, headers=headers).status_code == 401
 
 
 def test_opt_out_stops_notices_too(tmp_path):
