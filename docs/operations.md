@@ -72,6 +72,9 @@ The same actions are available as a JSON API under `/admin/v1/` with
 - `PUT /admin/v1/capabilities/{id}`, `DELETE ...` (add or override catalog entries at run time)
 - `GET /admin/v1/capability-requests`, `POST /admin/v1/capability-requests/{id}/decision` (status,
   note, link to a catalog entry; only the fields sent change), `.../hide` (with a reason), `.../unhide`
+- `POST /admin/v1/board/{seq}/purge` with `{"reason": "...", "confirm": "PURGE <seq>"}` (deletes a payload
+  for legal reasons; irreversible; see [decision 0018](decisions/0018-legal-purge-of-board-payloads.md),
+  including what to do about older backups)
 - `POST /admin/v1/notifications/test` (sends a test event to the webhook and reports the result)
 
 `status=open` lists every conversation waiting for the operator: a new request, or one where the agent

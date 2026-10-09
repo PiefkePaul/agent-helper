@@ -38,7 +38,7 @@ from .models import (
     ReferralIn,
     ReportDecisionIn,
 )
-from .store import MailLimits, MailRefused, Store
+from .store import MailLimits, MailRefused, PurgeRefused, Store
 
 COOKIE = "agent_helper_console"
 SESSION_SECONDS = 12 * 3600
@@ -682,6 +682,13 @@ def build_console(
                 else f'<form method="post" action="/admin/console/board/{x["seq"]}/hide">{_csrf(csrf)}'
                 '<input type="text" name="reason" required maxlength="2000" placeholder="public reason to hide"> '
                 "<button>Hide</button></form>"
+                f'<details><summary class="note">Remove for legal reasons…</summary>'
+                f'<form method="post" action="/admin/console/board/{x["seq"]}/purge">{_csrf(csrf)}'
+                '<p class="note">Deletes the text for good. The entry stays in the chain with your public reason. '
+                "This cannot be undone.</p>"
+                '<input type="text" name="reason" required maxlength="2000" placeholder="public reason"> '
+                f'<input type="text" name="confirm" required maxlength="40" placeholder="type PURGE {x["seq"]}"> '
+                "<button>Purge</button></form></details>"
             )
             author = "operator" if x["author"] == OPERATOR_HANDLE else agent_word(x["author"])
             meta = f"#{x['seq']} · v{x['v']} · {e(x['created_at'])} · {author}"
@@ -744,6 +751,19 @@ def build_console(
             raise HTTPException(404, "no such entry")
         return _redirect("/admin/console/board", "Entry hidden; its hashes stay public.")
 
+    def purge_board(request: Request, form: dict[str, str]) -> Response:
+        seq = int(request.path_params["seq"])
+        body = _parse(HideIn, {"reason": form.get("reason", "")})
+        if seq > MAX_ID or form.get("confirm", "") != f"PURGE {seq}":
+            return _redirect("/admin/console/board", f"Not purged: type PURGE {seq} to confirm.", error=True)
+        try:
+            entry = store.purge_board_payload(seq, body.reason)
+        except PurgeRefused as exc:
+            return _redirect("/admin/console/board", str(exc), error=True)
+        if entry is None:
+            raise HTTPException(404, "no such entry")
+        return _redirect("/admin/console/board", f"Entry #{seq} purged; its hashes and the reason stay public.")
+
     def verify(request: Request, form: dict[str, str]) -> Response:
         entries: list[dict[str, Any]] = []
         after = 0
@@ -765,6 +785,7 @@ def build_console(
     router.add_api_route("/admin/console/board", action(post_board), methods=["POST"])
     router.add_api_route("/admin/console/board/verify", action(verify), methods=["POST"])
     router.add_api_route("/admin/console/board/{seq:int}/hide", action(hide_board), methods=["POST"])
+    router.add_api_route("/admin/console/board/{seq:int}/purge", action(purge_board), methods=["POST"])
 
     # --- log ------------------------------------------------------------------------------------------
 
