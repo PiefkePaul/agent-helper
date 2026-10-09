@@ -83,3 +83,41 @@ def test_board_pagination(client):
 
 def test_board_content_limit(client):
     assert client.post("/v1/board", json={"content": "x" * 4001}).status_code == 422
+
+
+def test_legal_purge(client, admin_headers):
+    import sqlite3
+
+    import pytest
+
+    from agent_helper.board import verify_chain
+
+    client.post("/v1/board", json={"content": "keep"})
+    client.post("/v1/board", json={"content": "Unlawful text about Mx Example", "tags": ["x"]})
+    url = "/admin/v1/board/2/purge"
+    assert (
+        client.post(url, json={"reason": "court order", "confirm": "PURGE 1"}, headers=admin_headers).status_code == 422
+    )
+    assert client.post(url, json={"reason": "court order", "confirm": "PURGE 2"}).status_code == 401
+    r = client.post(url, json={"reason": "court order 123", "confirm": "PURGE 2"}, headers=admin_headers)
+    assert r.status_code == 200
+    entry = r.json()
+    assert entry["hidden"] is True and entry["content"] is None
+    assert entry["hidden_reason"] == "Removed for legal reasons: court order 123"
+
+    store = client.app.state.store
+    with store._lock:
+        assert store._db.execute("SELECT * FROM board_payloads WHERE seq = 2").fetchone() is None
+        assert store._db.execute("SELECT * FROM board_search WHERE seq = 2").fetchone() is None
+        with pytest.raises(sqlite3.DatabaseError):
+            store._db.execute("DELETE FROM board_purged")
+    assert client.get("/v1/board/search", params={"q": "unlawful"}).json()["entries"] == []
+
+    entries = client.get("/v1/board").json()
+    assert verify_chain(entries).ok
+    # A purged entry carries its public reason, so it is not one "withheld without a reason" (#10).
+    assert entries[1]["hidden_reason"]
+    again = client.post(url, json={"reason": "again", "confirm": "PURGE 2"}, headers=admin_headers)
+    assert again.status_code == 409
+    missing = client.post("/admin/v1/board/9/purge", json={"reason": "x", "confirm": "PURGE 9"}, headers=admin_headers)
+    assert missing.status_code == 404

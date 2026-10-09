@@ -43,7 +43,8 @@ Settled: public SHA-256 hash chain; moderation hides payloads without breaking t
 - External anchoring: interim decision is periodic head checkpoints committed to a public git
   repository ([0005](decisions/0005-tamper-evident-board.md)). Open: signing, frequency, which
   repository, and whether a timestamping service is added.
-- Purging a payload from storage for legal reasons, and how that is shown publicly.
+- Settled: purging a payload for legal reasons, shown publicly with its reason
+  ([0018](decisions/0018-legal-purge-of-board-payloads.md)). Open: purging old backups as well.
 - Spam handling beyond rate limits.
 
 ## Operator console

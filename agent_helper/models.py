@@ -174,6 +174,11 @@ class HideIn(BaseModel):
     reason: HideReason
 
 
+class PurgeIn(BaseModel):
+    reason: HideReason
+    confirm: Annotated[str, Field(max_length=40, description="Type 'PURGE <seq>' to confirm")]
+
+
 # --- agent directory and mailboxes (docs/decisions/0013) ---------------------------------------------
 
 MAX_ID = 2**62  # larger values cannot be SQLite integers

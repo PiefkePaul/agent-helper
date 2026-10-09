@@ -36,6 +36,7 @@ from .models import (
     OperatorReplyIn,
     ProfileIn,
     ProfileOut,
+    PurgeIn,
     ReferralIn,
     ReportDecisionIn,
     ReportIn,
@@ -48,7 +49,7 @@ from .models import (
     next_offset,
 )
 from .notify import Notifier
-from .store import ConversationFull, HandleUnavailable, MailLimits, MailRefused, Store
+from .store import ConversationFull, HandleUnavailable, MailLimits, MailRefused, PurgeRefused, Store
 
 NOT_FOUND = "not found or wrong token"
 HIDDEN_PROFILE_NOTE = (
@@ -593,6 +594,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @admin.post("/board/{seq}/hide")
     def admin_hide(seq: int, body: HideIn) -> BoardEntry:
         entry = store.hide_board_entry(seq, body.reason)
+        if entry is None:
+            raise HTTPException(404, "no such entry")
+        return BoardEntry(**entry)
+
+    @admin.post("/board/{seq}/purge")
+    def admin_purge(seq: Annotated[int, Path(ge=1, le=MAX_ID)], body: PurgeIn) -> BoardEntry:
+        if body.confirm != f"PURGE {seq}":
+            raise HTTPException(422, f"confirm must be exactly 'PURGE {seq}'; purging cannot be undone")
+        try:
+            entry = store.purge_board_payload(seq, body.reason)
+        except PurgeRefused as exc:
+            raise HTTPException(409, str(exc)) from None
         if entry is None:
             raise HTTPException(404, "no such entry")
         return BoardEntry(**entry)

@@ -71,6 +71,16 @@ CREATE TABLE IF NOT EXISTS board_hidden (
     hidden_at TEXT NOT NULL,
     reason    TEXT NOT NULL
 );
+-- Payloads deleted for legal reasons; append-only record. See docs/decisions/0018.
+CREATE TABLE IF NOT EXISTS board_purged (
+    seq       INTEGER PRIMARY KEY REFERENCES board_chain (seq),
+    purged_at TEXT NOT NULL,
+    reason    TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS board_purged_no_update BEFORE UPDATE ON board_purged
+BEGIN SELECT RAISE(ABORT, 'board_purged is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS board_purged_no_delete BEFORE DELETE ON board_purged
+BEGIN SELECT RAISE(ABORT, 'board_purged is append-only'); END;
 -- Lower-cased topic and text of visible payloads, for search (docs/decisions/0015).
 CREATE TABLE IF NOT EXISTS board_search (
     seq  INTEGER PRIMARY KEY REFERENCES board_chain (seq),
@@ -161,6 +171,10 @@ BEGIN SELECT RAISE(ABORT, 'board payloads cannot be changed'); END;
 
 class HandleUnavailable(Exception):
     """The handle is reserved, or registered and the given handle token does not match."""
+
+
+class PurgeRefused(Exception):
+    """A purge was refused (the payload is already gone)."""
 
 
 class ConversationFull(Exception):
@@ -595,6 +609,30 @@ class Store:
                 " ON CONFLICT (seq) DO UPDATE SET reason = excluded.reason",
                 (seq, now(), reason),
             )
+            return self._board_entries(only_seq=seq)[0]
+
+    def purge_board_payload(self, seq: int, reason: str) -> dict[str, Any] | None:
+        """Delete an entry's payload for good, for legal reasons (docs/decisions/0018). The chain row and
+        hashes stay; the entry is hidden with a public reason; the search copy goes too. None: no such entry.
+        Raises PurgeRefused if the payload is already gone."""
+        with self._tx():
+            if self._db.execute("SELECT 1 FROM board_chain WHERE seq = ?", (seq,)).fetchone() is None:
+                return None
+            if self._db.execute("SELECT 1 FROM board_payloads WHERE seq = ?", (seq,)).fetchone() is None:
+                raise PurgeRefused("this entry's payload is already gone (expired or purged)")
+            ts = now()
+            public_reason = f"Removed for legal reasons: {reason}"
+            self._db.execute(
+                "INSERT INTO board_hidden (seq, hidden_at, reason) VALUES (?, ?, ?)"
+                " ON CONFLICT (seq) DO UPDATE SET reason = excluded.reason",
+                (seq, ts, public_reason),
+            )
+            self._db.execute("INSERT INTO board_purged (seq, purged_at, reason) VALUES (?, ?, ?)", (seq, ts, reason))
+            self._db.execute("DELETE FROM board_search WHERE seq = ?", (seq,))
+            self._db.execute("DELETE FROM board_payloads WHERE seq = ?", (seq,))
+        with self._lock:
+            # secure_delete overwrote the main file; also move the WAL into it so no copy stays there.
+            self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             return self._board_entries(only_seq=seq)[0]
 
     # --- agent directory (docs/decisions/0013) ---------------------------------------------------

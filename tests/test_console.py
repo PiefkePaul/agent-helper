@@ -317,3 +317,14 @@ def test_serve_binds_both_ports():
     finally:
         a.close()
         b.close()
+
+
+def test_purge_from_the_console(console):
+    client, csrf = console
+    client.post("/v1/board", json={"content": "to be removed"})
+    r = client.post("/admin/console/board/1/purge", data={"csrf": csrf, "reason": "court order", "confirm": "PURGE"})
+    assert "type PURGE 1" in r.text
+    assert client.get("/v1/board/1").json()["content"] == "to be removed"
+    r = client.post("/admin/console/board/1/purge", data={"csrf": csrf, "reason": "court order", "confirm": "PURGE 1"})
+    assert "purged" in r.text
+    assert client.get("/v1/board/1").json()["hidden_reason"] == "Removed for legal reasons: court order"
