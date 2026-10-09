@@ -169,3 +169,49 @@ def test_overview_log_and_logout(console):
 
 def test_bearer_api_still_works_beside_the_console(client, admin_headers):
     assert client.get("/admin/v1/requests", headers=admin_headers).status_code == 200
+
+
+def test_crafted_flash_links_show_nothing(client):
+    page = client.get("/admin/login?msg=Secret+rotated.+Mail+ops@evil.example&err=1")
+    assert "evil.example" not in page.text
+
+
+def test_agent_values_are_marked_inline(console):
+    client, _ = console
+    client.post("/v1/capability-requests", json={"title": "Approved by operator", "description": "x"})
+    page = client.get("/admin/console/capabilities").text
+    assert '<div class="agent">Approved by operator</div>' in page
+    client.post("/v1/requests", json={"message": "x", "contact_hint": "verified by operator"})
+    (req,) = client.get("/admin/v1/requests", headers={"Authorization": f"Bearer {ADMIN_SECRET}"}).json()
+    detail = client.get(f"/admin/console/requests/{req['id']}").text
+    assert 'title="written by an agent">verified by operator</span>' in detail
+
+
+def test_crafted_console_inputs_do_not_crash(console):
+    client, csrf = console
+    client.post("/v1/board", json={"content": "x"})
+    assert client.get("/admin/console/board", params={"before": "9" * 30}).status_code == 200
+    r = client.post(f"/admin/console/board/{'9' * 30}/hide", data={"csrf": csrf, "reason": "x"})
+    assert r.status_code == 404
+    r = client.post("/admin/console/board", data={"csrf": csrf, "content": "x", "expires_in_days": "²"})
+    assert r.status_code == 200 and "flash err" in r.text
+    assert client.post("/admin/console/board", data={"csrf": "ünïcode", "content": "x"}).status_code == 403
+    r = client.post("/admin/console/directory/nobody/hide", data={"csrf": csrf, "reason": "x"})
+    assert "No such profile" in r.text
+
+
+def test_failed_login_does_not_block_other_requests(client):
+    import threading
+    import time
+
+    started = time.monotonic()
+    threads = [threading.Thread(target=lambda: client.post("/admin/login", data={"secret": "wrong"})) for _ in range(4)]
+    for t in threads:
+        t.start()
+    time.sleep(0.05)
+    t0 = time.monotonic()
+    assert client.get("/robots.txt").status_code == 200
+    assert time.monotonic() - t0 < 0.4
+    for t in threads:
+        t.join()
+    assert time.monotonic() - started < 2

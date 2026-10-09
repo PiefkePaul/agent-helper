@@ -7,6 +7,7 @@ per-session CSRF token. Sessions live in memory and end on restart.
 
 from __future__ import annotations
 
+import asyncio
 import collections
 import hashlib
 import hmac
@@ -22,12 +23,14 @@ from urllib.parse import parse_qs, quote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel, ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from . import __version__, board
 from .catalog import Catalog
 from .config import Settings
 from .handles import OPERATOR_HANDLE
 from .models import (
+    MAX_ID,
     CapabilityDecisionIn,
     HideIn,
     OperatorBoardIn,
@@ -116,6 +119,7 @@ table{border-collapse:collapse;width:100%;background:#fff}td,th{border-bottom:1p
 text-align:left;vertical-align:top}th{background:#eef1f3}
 .agent{white-space:pre-wrap;background:#fffbe6;border-left:3px solid #e0b100;padding:.4rem .6rem;margin:.3rem 0;
 overflow-wrap:anywhere}
+.a{background:#fff3c4;border-bottom:1px dotted #b38600;padding:0 .2em;overflow-wrap:anywhere}
 .op{white-space:pre-wrap;background:#e9f4ff;border-left:3px solid #2b7bd0;padding:.4rem .6rem;margin:.3rem 0}
 .note{color:#555;font-size:.9em}.flash{background:#e7f7e9;border:1px solid #9cd3a3;padding:.5rem;margin-bottom:1rem}
 .err{background:#fdecec;border-color:#e3a1a1}form.inline{display:inline}
@@ -139,6 +143,11 @@ NAV = [
 def agent_text(text: str | None) -> str:
     """Untrusted text, escaped and visibly marked as written by an agent."""
     return f'<div class="agent">{e(text or "")}</div>'
+
+
+def agent_word(text: str | None) -> str:
+    """A short agent-written value (handle, title, tag) inside a line: escaped and marked."""
+    return f'<span class="a" title="written by an agent">{e(text)}</span>' if text else '<span class="note">none</span>'
 
 
 def _page(title: str, body: str, csrf: str | None, msg: str | None = None, error: bool = False) -> HTMLResponse:
@@ -168,9 +177,19 @@ def _options(values: list[str], selected: str | None = None) -> str:
     return "".join(f"<option{' selected' if v == selected else ''}>{e(v)}</option>" for v in values)
 
 
+_FLASH_KEY = secrets.token_bytes(32)
+
+
+def _flash_sig(msg: str, error: bool) -> str:
+    return hmac.new(_FLASH_KEY, f"{int(error)}:{msg}".encode(), hashlib.sha256).hexdigest()[:32]
+
+
 def _redirect(path: str, msg: str | None = None, error: bool = False) -> RedirectResponse:
+    """Redirect after a form. The message is signed, so a crafted link cannot put text into the console."""
     if msg:
-        path += ("&" if "?" in path else "?") + f"msg={quote(msg)}" + ("&err=1" if error else "")
+        msg = msg[:300]
+        path += ("&" if "?" in path else "?") + f"msg={quote(msg)}&sig={_flash_sig(msg, error)}"
+        path += "&err=1" if error else ""
     return RedirectResponse(path, status_code=303)
 
 
@@ -198,6 +217,25 @@ def _page_of(action_path: str) -> str:
     return f"/admin/console/{collection}"
 
 
+def _int_or_raw(value: str) -> int | str | None:
+    """An integer if `value` is a plain decimal number, else the raw text (which then fails validation)."""
+    if not value:
+        return None
+    try:
+        return int(value) if value.isascii() and value.isdigit() and len(value) <= 6 else value
+    except ValueError:
+        return value
+
+
+def _latest(messages: list[dict[str, Any]]) -> str:
+    if not messages:
+        return ""
+    last = messages[-1]
+    if last["sender"] == "operator":
+        return f'<span class="note">you:</span> {e(last["body"][:120])}'
+    return agent_word(last["body"][:120])
+
+
 def _parse[M: BaseModel](model: type[M], data: dict[str, Any]) -> M:
     return model.model_validate(data)
 
@@ -220,8 +258,10 @@ def build_console(
         return sessions.csrf_for(request.cookies.get(COOKIE))
 
     def flash(request: Request) -> tuple[str | None, bool]:
-        msg = request.query_params.get("msg")
-        return (msg[:300] if msg else None), request.query_params.get("err") == "1"
+        msg, error = request.query_params.get("msg"), request.query_params.get("err") == "1"
+        if not msg or not hmac.compare_digest(request.query_params.get("sig", ""), _flash_sig(msg, error)):
+            return None, False
+        return msg, error
 
     def view(handler: Callable[[Request, str], HTMLResponse]) -> Callable[[Request], Any]:
         """A GET page that needs a session."""
@@ -244,10 +284,11 @@ def build_console(
             if csrf is None:
                 return RedirectResponse("/admin/login", status_code=303)
             form = await _form(request)
-            if not hmac.compare_digest(form.get("csrf", ""), csrf):
+            if not hmac.compare_digest(form.get("csrf", "").encode(), csrf.encode()):
                 raise HTTPException(403, "invalid form token; reload the page")
             try:
-                return handler(request, form)
+                # Handlers use the database and may call the webhook; keep them off the event loop.
+                return await run_in_threadpool(handler, request, form)
             except ValidationError as exc:
                 return _redirect(_page_of(request.url.path), _problem(exc), error=True)
             except MailRefused as exc:
@@ -286,7 +327,7 @@ def build_console(
         form = await _form(request)
         given = form.get("secret", "").encode()
         if not hmac.compare_digest(given, (settings.admin_secret or "").encode()):
-            time.sleep(0.5)  # on top of the write rate limit
+            await asyncio.sleep(0.5)  # on top of the write rate limit; never blocks other requests
             return _redirect("/admin/login", "Wrong secret.", error=True)
         token, _ = sessions.create()
         response = RedirectResponse("/admin/console", status_code=303)
@@ -306,7 +347,7 @@ def build_console(
         enabled()
         csrf = session(request)
         form = await _form(request)
-        if csrf and hmac.compare_digest(form.get("csrf", ""), csrf):
+        if csrf and hmac.compare_digest(form.get("csrf", "").encode(), csrf.encode()):
             sessions.drop(request.cookies.get(COOKIE))
         response = RedirectResponse("/admin/login", status_code=303)
         response.delete_cookie(COOKIE, path="/admin")
@@ -354,8 +395,8 @@ def build_console(
             status = None
         rows = "".join(
             f'<tr><td><a href="/admin/console/requests/{e(r["id"])}">{e(r["id"])}</a></td><td>{e(r["status"])}</td>'
-            f"<td>{e(r['created_at'])}</td><td>{e(r['handle'] or '')}</td><td>{len(r['messages'])}</td>"
-            f"<td>{e((r['messages'][-1]['body'] if r['messages'] else '')[:120])}</td></tr>"
+            f"<td>{e(r['created_at'])}</td><td>{agent_word(r['handle'])}</td><td>{len(r['messages'])}</td>"
+            f"<td>{_latest(r['messages'])}</td></tr>"
             for r in store.list_requests(status, 200)
         )
         filters = " · ".join(
@@ -365,7 +406,7 @@ def build_console(
         body = (
             f'<p>{filters}</p><p class="note">"open" means the agent wrote last and waits for you.</p>'
             "<table><tr><th>Id</th><th>Status</th><th>Created</th><th>Handle</th><th>Messages</th>"
-            f"<th>Latest (agent text)</th></tr>{rows}</table>"
+            f"<th>Latest message</th></tr>{rows}</table>"
         )
         msg, err = flash(request)
         return _page("Requests", body, csrf, msg, err)
@@ -384,8 +425,8 @@ def build_console(
         )
         base = f"/admin/console/requests/{e(req_id)}"
         body = (
-            f"<p>Status: <b>{e(found['status'])}</b> · handle: {e(found['handle'] or 'none')} · contact hint: "
-            f"{e(found['contact_hint'] or 'none')}</p>{convo}"
+            f"<p>Status: <b>{e(found['status'])}</b> · handle: {agent_word(found['handle'])} · contact hint: "
+            f"{agent_word(found['contact_hint'])}</p>{convo}"
             f'<h2>Reply</h2><form method="post" action="{base}/reply">{_csrf(csrf)}'
             '<textarea name="message" required maxlength="8000"></textarea>'
             f'<p>Set status: <select name="status">{_options(["answered", "open", "closed"], "answered")}</select> '
@@ -488,8 +529,8 @@ def build_console(
                 "<button>Hide</button></form>"
             )
             rows.append(
-                f"<tr><td><b>{e(r['title'])}</b> <span class='note'>{e(r['id'])} · {r['votes']} vote(s) · "
-                f"by {e(r['requested_by'] or 'anonymous')}</span>{agent_text(r['description'])}"
+                f"<tr><td><span class='note'>{e(r['id'])} · {r['votes']} vote(s) · by "
+                f"{agent_word(r['requested_by'])}</span>{agent_text(r['title'])}{agent_text(r['description'])}"
                 f'<form method="post" action="{base}/decision">{_csrf(csrf)}'
                 f'<select name="status">{_options(statuses, r["status"])}</select> '
                 f'<input type="text" name="note" maxlength="2000" placeholder="note" '
@@ -565,7 +606,7 @@ def build_console(
             details += "\nTags: " + ", ".join(p["tags"]) + "\nContact: "
             details += ", ".join(f"{c['kind']}: {c['value']}" for c in p["contact"])
             rows.append(
-                f"<tr><td><b>{e(p['handle'])}</b> <span class='note'>updated {e(p['updated_at'])}</span>"
+                f"<tr><td>{agent_word(p['handle'])} <span class='note'>updated {e(p['updated_at'])}</span>"
                 f"{agent_text(p['summary'])}{agent_text(details)}{toggle}</td></tr>"
             )
         body = f"<p class='note'>Profiles are written by agents and unverified.</p><table>{''.join(rows)}</table>"
@@ -576,11 +617,13 @@ def build_console(
 
     def hide_profile(request: Request, form: dict[str, str]) -> Response:
         body = _parse(HideIn, {"reason": form.get("reason", "")})
-        store.set_profile_hidden(request.path_params["handle"], body.reason)
+        if not store.set_profile_hidden(request.path_params["handle"], body.reason):
+            return _redirect("/admin/console/directory", "No such profile.", error=True)
         return _redirect("/admin/console/directory", "Profile hidden.")
 
     def unhide_profile(request: Request, form: dict[str, str]) -> Response:
-        store.set_profile_hidden(request.path_params["handle"], None)
+        if not store.set_profile_hidden(request.path_params["handle"], None):
+            return _redirect("/admin/console/directory", "No such profile.", error=True)
         return _redirect("/admin/console/directory", "Profile visible again.")
 
     router.add_api_route("/admin/console/directory/{handle}/hide", action(hide_profile), methods=["POST"])
@@ -594,6 +637,7 @@ def build_console(
             before = int(request.query_params.get("before", head["seq"] + 1))
         except ValueError:
             before = head["seq"] + 1
+        before = min(max(before, 1), head["seq"] + 1)
         start = max(0, before - 51)
         entries = list(reversed(store.list_board(start, max(1, before - 1 - start))))
         rows = []
@@ -607,8 +651,9 @@ def build_console(
                 '<input type="text" name="reason" required maxlength="2000" placeholder="public reason to hide"> '
                 "<button>Hide</button></form>"
             )
-            meta = f"#{x['seq']} · v{x['v']} · {e(x['created_at'])} · {e(x['author'] or 'anonymous')}"
-            meta += f" · topic: {e(x['topic'] or '')} · tags: {e(', '.join(x['tags'] or []))}"
+            author = "operator" if x["author"] == OPERATOR_HANDLE else agent_word(x["author"])
+            meta = f"#{x['seq']} · v{x['v']} · {e(x['created_at'])} · {author}"
+            meta += f" · topic: {agent_word(x['topic'])} · tags: {agent_word(', '.join(x['tags'] or []))}"
             meta += f" · expires: {e(x['expires_at'] or 'never')} {e(state)}"
             text = (
                 ""
@@ -647,7 +692,7 @@ def build_console(
                 "content": form.get("content", ""),
                 "topic": form.get("topic") or None,
                 "tags": tags,
-                "expires_in_days": int(days) if days.isdigit() else (None if not days else days),
+                "expires_in_days": _int_or_raw(days),
             },
         )
         entry, _ = store.append_board_entry(
@@ -662,7 +707,8 @@ def build_console(
 
     def hide_board(request: Request, form: dict[str, str]) -> Response:
         body = _parse(HideIn, {"reason": form.get("reason", "")})
-        if store.hide_board_entry(int(request.path_params["seq"]), body.reason) is None:
+        seq = int(request.path_params["seq"])
+        if seq > MAX_ID or store.hide_board_entry(seq, body.reason) is None:
             raise HTTPException(404, "no such entry")
         return _redirect("/admin/console/board", "Entry hidden; its hashes stay public.")
 
