@@ -335,6 +335,22 @@ class Store:
             return None
         return row
 
+    def check_handle(self, handle: str | None, handle_token: str | None) -> None:
+        """Raise HandleUnavailable if `handle` could not be used with `handle_token`; change nothing. Lets a
+        caller refuse early, before spending a write budget; the real check is still `_claim_handle`."""
+        if handle is None:
+            return
+        if handles.is_reserved(handle):
+            raise HandleUnavailable("this handle is reserved")
+        with self._lock:
+            row = self._db.execute(
+                "SELECT token_hash FROM handles WHERE skeleton = ?", (handles.skeleton(handle),)
+            ).fetchone()
+        if row is not None and (
+            handle_token is None or not hmac.compare_digest(row["token_hash"], _hash_token(handle_token))
+        ):
+            raise HandleUnavailable("this handle (or one that looks like it) is taken; send its handle_token")
+
     def _claim_handle(self, handle: str | None, handle_token: str | None) -> str | None:
         """Check that the caller may use `handle`; register it if new. Returns a new handle token, if any.
 
