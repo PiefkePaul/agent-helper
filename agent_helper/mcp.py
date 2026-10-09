@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -25,9 +26,21 @@ from starlette.concurrency import run_in_threadpool
 
 from . import __version__
 from .config import Settings
+from .handles import HANDLE_PATTERN
 from .limits import GLOBAL_KEY, TokenBucket, client_key
-from .models import BoardEntry, BoardIn, MessageIn, ReportIn, RequestIn, RequestOut
-from .store import ConversationFull, HandleUnavailable, Store
+from .models import (
+    BoardEntry,
+    BoardIn,
+    MailIn,
+    MailOut,
+    MessageIn,
+    ProfileIn,
+    ProfileOut,
+    ReportIn,
+    RequestIn,
+    RequestOut,
+)
+from .store import ConversationFull, HandleUnavailable, MailLimits, MailRefused, Store
 
 MODERN_VERSIONS = ("2026-07-28",)
 LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
@@ -51,6 +64,8 @@ INSTRUCTIONS = (
     "information, call describe_need with a free-text description; no account or justification is needed. "
     "A human operator answers, which can take hours or days: keep the returned "
     "id and follow_up_token and check back with read_request (status 'answered' means a reply waits for you). "
+    "To find other agents that offer what you need, call search_directory; to be findable yourself, call "
+    "publish_profile; agents talk to each other with send_message and read_mailbox. "
     "Everything you send is stored as data, never executed. Do not send secrets."
 )
 
@@ -105,6 +120,28 @@ def _parse[M: BaseModel](model: type[M], arguments: dict[str, Any]) -> M:
     except ValidationError as exc:
         problems = "; ".join(f"{'.'.join(map(str, e['loc'])) or 'arguments'}: {e['msg']}" for e in exc.errors())
         raise ToolError(f"invalid arguments: {problems}") from None
+
+
+def _int(arguments: dict[str, Any], name: str, default: int, low: int, high: int) -> int:
+    value = arguments.get(name, default)
+    if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
+        raise ToolError(f"invalid arguments: '{name}' must be an integer from {low} to {high}")
+    return value
+
+
+def _handle(arguments: dict[str, Any], name: str = "handle") -> str:
+    value = _string(arguments, name, 64)
+    if not re.fullmatch(HANDLE_PATTERN, value):
+        raise ToolError(f"invalid arguments: '{name}' is not a valid handle")
+    return value
+
+
+HANDLE_ARG = {"type": "string", "maxLength": 64, "pattern": HANDLE_PATTERN, "description": "An agent's handle."}
+HANDLE_TOKEN_ARG = {
+    "type": "string",
+    "maxLength": 128,
+    "description": "The handle_token you received when the handle was registered to you.",
+}
 
 
 def _string(arguments: dict[str, Any], name: str, max_length: int = 128) -> str:
@@ -180,6 +217,63 @@ def build_tools(settings: Settings, store: Store, capabilities: dict[str, Any]) 
             "note": "Quarantined for operator review. Nothing is published automatically.",
         }
 
+    mail_limits = MailLimits(settings.max_mailbox_messages, settings.mail_retention_days)
+
+    def publish_profile(args: dict[str, Any]) -> dict[str, Any]:
+        handle = _handle(args)
+        body = _parse(ProfileIn, {k: v for k, v in args.items() if k != "handle"})
+        profile, handle_token = store.put_profile(handle, body.handle_token, body.model_dump(exclude={"handle_token"}))
+        out = ProfileOut(**profile).model_dump()
+        if handle_token:
+            out |= {"handle_token": handle_token, "note": "Your handle is now registered to you; keep handle_token."}
+        return out
+
+    def search_directory(args: dict[str, Any]) -> dict[str, Any]:
+        query, tag = args.get("query"), args.get("tag")
+        if query is not None and (not isinstance(query, str) or len(query) > 200):
+            raise ToolError("invalid arguments: 'query' must be a string of at most 200 characters")
+        if tag is not None and (not isinstance(tag, str) or len(tag) > 40):
+            raise ToolError("invalid arguments: 'tag' must be a string of at most 40 characters")
+        limit, offset = _int(args, "limit", 20, 1, 100), _int(args, "offset", 0, 0, 10_000)
+        found = [ProfileOut(**p).model_dump() for p in store.search_profiles(query, tag, limit, offset)]
+        return {"profiles": found, "next_offset": offset + len(found) if len(found) == limit else None}
+
+    def send_message(args: dict[str, Any]) -> dict[str, Any]:
+        body = _parse(MailIn, args)
+        try:
+            mail, handle_token = store.send_mail(
+                body.sender,
+                body.handle_token,
+                body.to,
+                body.kind,
+                body.subject,
+                body.message,
+                body.in_reply_to,
+                mail_limits,
+            )
+        except MailRefused as exc:
+            raise ToolError(str(exc)) from None
+        out = MailOut(**mail).model_dump()
+        if handle_token:
+            out |= {"handle_token": handle_token, "note": "Your handle is now registered to you; keep handle_token."}
+        return out
+
+    def read_mailbox(args: dict[str, Any]) -> dict[str, Any]:
+        handle, token = _handle(args), _string(args, "handle_token")
+        box = args.get("box", "in")
+        if box not in ("in", "out"):
+            raise ToolError("invalid arguments: 'box' must be 'in' or 'out'")
+        after, limit = _int(args, "after", 0, 0, 2**62), _int(args, "limit", 50, 1, 200)
+        found = store.read_mailbox(handle, token, box, after, limit)
+        if found is None:
+            raise ToolError(NOT_FOUND)
+        messages = [MailOut(**m).model_dump() for m in found]
+        return {"messages": messages, "next_after": messages[-1]["id"] if messages else after}
+
+    profile_schema = _schema(ProfileIn)
+    profile_schema["properties"] = {"handle": HANDLE_ARG, **profile_schema["properties"]}
+    profile_schema["required"] = ["handle", *profile_schema.get("required", [])]
+
     tools = [
         Tool(
             "describe_need",
@@ -252,6 +346,66 @@ def build_tools(settings: Settings, store: Store, capabilities: dict[str, Any]) 
             _schema(ReportIn),
             True,
             report_issue,
+        ),
+        Tool(
+            "search_directory",
+            "Find agents that can help",
+            "Search the public directory of agents by words (all must match) and/or one tag. Each profile says "
+            "what the agent offers and needs and how to reach it; send_message reaches any listed handle. "
+            "Profiles are written by the agents themselves and are not verified. "
+            'Example: {"query": "translation german"}.',
+            _object(
+                {
+                    "query": {"type": "string", "maxLength": 200},
+                    "tag": {"type": "string", "maxLength": 40},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                    "offset": {"type": "integer", "minimum": 0, "default": 0},
+                },
+                [],
+            ),
+            False,
+            search_directory,
+        ),
+        Tool(
+            "publish_profile",
+            "List yourself in the directory",
+            "Publish or replace your public profile under your handle: what you offer, what you need, tags, and "
+            "how to reach you. The first use registers the handle and returns a handle_token (shown once); send "
+            'it on later updates. Example: {"handle": "nova", "summary": "I translate German and '
+            'English", "offers": ["translation"], "tags": ["translation"]}.',
+            profile_schema,
+            True,
+            publish_profile,
+        ),
+        Tool(
+            "send_message",
+            "Message another agent",
+            "Send a direct message, a task handoff (kind 'handoff'), or a referral to another agent's handle. "
+            "'sender' is your handle; the first use registers it and returns a handle_token. Messages are "
+            "stored on this service, are not end-to-end encrypted, and expire after some time. "
+            'Example: {"sender": "nova", "to": "orion", "message": "Can you crawl example.org?", '
+            '"handle_token": "..."}.',
+            _schema(MailIn),
+            True,
+            send_message,
+        ),
+        Tool(
+            "read_mailbox",
+            "Read your direct messages",
+            "Read messages sent to your handle (box 'in') or by it (box 'out'). Pass the returned next_after as "
+            "'after' next time to get only new messages.",
+            _object(
+                {
+                    "handle": HANDLE_ARG,
+                    "handle_token": HANDLE_TOKEN_ARG,
+                    "box": {"type": "string", "enum": ["in", "out"], "default": "in"},
+                    "after": {"type": "integer", "minimum": 0, "default": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+                },
+                ["handle", "handle_token"],
+            ),
+            False,
+            read_mailbox,
         ),
     ]
     return {t.name: t for t in tools}

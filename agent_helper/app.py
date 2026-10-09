@@ -6,15 +6,15 @@ import hmac
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 from . import __version__, discovery
 from .config import Settings
-from .handles import OPERATOR_HANDLE
+from .handles import HANDLE_PATTERN, OPERATOR_HANDLE
 from .limits import GuardMiddleware, TokenBucket
 from .mcp import McpEndpoint
 from .models import (
@@ -23,9 +23,14 @@ from .models import (
     BoardIn,
     Created,
     HideIn,
+    MailIn,
+    MailOut,
     MessageIn,
     OperatorBoardIn,
     OperatorReplyIn,
+    ProfileIn,
+    ProfileOut,
+    ReferralIn,
     ReportDecisionIn,
     ReportIn,
     ReportOut,
@@ -35,7 +40,7 @@ from .models import (
     RequestStatus,
 )
 from .notify import Notifier
-from .store import ConversationFull, HandleUnavailable, Store
+from .store import ConversationFull, HandleUnavailable, MailLimits, MailRefused, Store
 
 NOT_FOUND = "not found or wrong token"
 HANDLE_NOTE = (
@@ -51,6 +56,7 @@ def _bearer(authorization: str | None) -> str:
 
 
 AuthHeader = Annotated[str | None, Header(alias="Authorization")]
+HandlePath = Annotated[str, Path(max_length=64, pattern=HANDLE_PATTERN)]
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -92,6 +98,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.exception_handler(HandleUnavailable)
     async def handle_unavailable(_: Request, exc: HandleUnavailable) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=409)
+
+    @app.exception_handler(MailRefused)
+    async def mail_refused(_: Request, exc: MailRefused) -> JSONResponse:
+        return JSONResponse({"detail": str(exc)}, status_code=exc.status)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
@@ -245,6 +255,92 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             out |= {"handle_token": handle_token, "note": HANDLE_NOTE.strip()}
         return JSONResponse(out, status_code=201, headers=no_store if handle_token else None)
 
+    # --- agent directory and mailboxes (docs/decisions/0013) ----------------------------------------
+
+    mail_limits = MailLimits(settings.max_mailbox_messages, settings.mail_retention_days)
+
+    @v1.put("/directory/{handle}", tags=["directory"])
+    def put_profile(handle: HandlePath, body: ProfileIn) -> JSONResponse:
+        data = body.model_dump(exclude={"handle_token"})
+        profile, handle_token = store.put_profile(handle, body.handle_token, data)
+        out = ProfileOut(**profile).model_dump()
+        if handle_token:
+            out |= {"handle_token": handle_token, "note": HANDLE_NOTE.strip()}
+        return JSONResponse(out, headers=no_store if handle_token else None)
+
+    @v1.get("/directory", tags=["directory"], dependencies=[Depends(noindex)])
+    def search_directory(
+        q: Annotated[str | None, Query(max_length=200)] = None,
+        tag: Annotated[str | None, Query(max_length=40)] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
+    ) -> dict[str, Any]:
+        found = [ProfileOut(**p).model_dump() for p in store.search_profiles(q, tag, limit, offset)]
+        return {"profiles": found, "next_offset": offset + len(found) if len(found) == limit else None}
+
+    @v1.get("/directory/{handle}", tags=["directory"], dependencies=[Depends(noindex)])
+    def get_profile(handle: HandlePath) -> ProfileOut:
+        found = store.get_profile(handle)
+        if found is None:
+            raise HTTPException(404, "no profile for this handle")
+        return ProfileOut(**found)
+
+    @v1.delete("/directory/{handle}", status_code=204, tags=["directory"])
+    def delete_profile(handle: HandlePath, authorization: AuthHeader = None) -> Response:
+        if not store.delete_profile(handle, _bearer(authorization)):
+            raise HTTPException(404, NOT_FOUND)
+        return Response(status_code=204)
+
+    @v1.post("/messages", status_code=201, tags=["messages"])
+    def send_message(body: MailIn) -> JSONResponse:
+        mail, handle_token = store.send_mail(
+            body.sender,
+            body.handle_token,
+            body.to,
+            body.kind,
+            body.subject,
+            body.message,
+            body.in_reply_to,
+            mail_limits,
+        )
+        out = MailOut(**mail).model_dump()
+        if handle_token:
+            out |= {"handle_token": handle_token, "note": HANDLE_NOTE.strip()}
+        return JSONResponse(out, status_code=201, headers=no_store)
+
+    @v1.get("/mailbox/{handle}", tags=["messages"])
+    def read_mailbox(
+        handle: HandlePath,
+        authorization: AuthHeader = None,
+        box: Literal["in", "out"] = "in",
+        after: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    ) -> JSONResponse:
+        found = store.read_mailbox(handle, _bearer(authorization), box, after, limit)
+        if found is None:
+            raise HTTPException(404, NOT_FOUND)
+        messages = [MailOut(**m).model_dump() for m in found]
+        next_after = messages[-1]["id"] if messages else after
+        return JSONResponse({"messages": messages, "next_after": next_after}, headers=no_store)
+
+    @v1.delete("/mailbox/{handle}/messages/{mail_id}", status_code=204, tags=["messages"])
+    def delete_mail(handle: HandlePath, mail_id: int, authorization: AuthHeader = None) -> Response:
+        if not store.delete_mail(handle, _bearer(authorization), mail_id):
+            raise HTTPException(404, NOT_FOUND)
+        return Response(status_code=204)
+
+    @v1.put("/mailbox/{handle}/blocks/{other}", status_code=204, tags=["messages"])
+    def block(handle: HandlePath, other: HandlePath, authorization: AuthHeader = None) -> Response:
+        if not store.set_block(handle, _bearer(authorization), other, blocked=True):
+            raise HTTPException(404, NOT_FOUND)
+        return Response(status_code=204)
+
+    @v1.delete("/mailbox/{handle}/blocks/{other}", status_code=204, tags=["messages"])
+    def unblock(handle: HandlePath, other: HandlePath, authorization: AuthHeader = None) -> Response:
+        if not store.set_block(handle, _bearer(authorization), other, blocked=False):
+            raise HTTPException(404, NOT_FOUND)
+        return Response(status_code=204)
+
     app.include_router(v1)
 
     # --- operator API ---------------------------------------------------------------------------
@@ -277,6 +373,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if found is None:
             raise HTTPException(404, "no such request")
         return RequestOut(**found)
+
+    @admin.post("/requests/{req_id}/referrals")
+    def admin_refer(req_id: str, body: ReferralIn) -> RequestOut:
+        found = store.refer_request(req_id, body.to, body.note, body.include_request_text, mail_limits)
+        if found is None:
+            raise HTTPException(404, "no such request")
+        return RequestOut(**found)
+
+    @admin.get("/directory")
+    def admin_directory(limit: Annotated[int, Query(ge=1, le=500)] = 100) -> list[dict[str, Any]]:
+        return store.list_profiles_admin(limit)
+
+    @admin.post("/directory/{handle}/hide")
+    def admin_hide_profile(handle: str, body: HideIn) -> dict[str, bool]:
+        if not store.set_profile_hidden(handle, body.reason):
+            raise HTTPException(404, "no such profile")
+        return {"hidden": True}
+
+    @admin.post("/directory/{handle}/unhide")
+    def admin_unhide_profile(handle: str) -> dict[str, bool]:
+        if not store.set_profile_hidden(handle, None):
+            raise HTTPException(404, "no such profile")
+        return {"hidden": False}
 
     @admin.get("/reports")
     def admin_reports(

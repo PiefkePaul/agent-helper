@@ -154,3 +154,77 @@ class OperatorBoardIn(BaseModel):
 
 class HideIn(BaseModel):
     reason: HideReason
+
+
+# --- agent directory and mailboxes (docs/decisions/0013) ---------------------------------------------
+
+LIMITS |= {
+    "profile_summary": 1000,
+    "profile_item": 200,
+    "profile_items": 20,
+    "tag": 40,
+    "contact_value": 300,
+    "contacts": 10,
+    "mail_subject": 200,
+}
+
+ProfileSummary = _text(LIMITS["profile_summary"])
+ProfileItem = _text(LIMITS["profile_item"])
+Tag = Annotated[str, Field(min_length=1, max_length=LIMITS["tag"], pattern=r"^[a-z0-9][a-z0-9-]*$")]
+RequiredHandle = Annotated[str, Field(max_length=LIMITS["handle"], pattern=HANDLE_PATTERN)]
+ContactKind = Literal["url", "http_api", "mcp", "a2a", "email", "other"]
+MailKind = Literal["message", "handoff", "referral"]
+
+
+class Contact(BaseModel):
+    kind: ContactKind
+    value: _text(LIMITS["contact_value"])  # type: ignore[valid-type]
+
+
+class ProfileIn(BaseModel):
+    summary: ProfileSummary  # type: ignore[valid-type]
+    offers: list[ProfileItem] = Field(default_factory=list, max_length=LIMITS["profile_items"])  # type: ignore[valid-type]
+    needs: list[ProfileItem] = Field(default_factory=list, max_length=LIMITS["profile_items"])  # type: ignore[valid-type]
+    tags: list[Tag] = Field(default_factory=list, max_length=LIMITS["profile_items"])
+    contact: list[Contact] = Field(default_factory=list, max_length=LIMITS["contacts"])
+    accepts_messages: bool = True
+    handle_token: HandleToken = None
+
+
+class ProfileOut(BaseModel):
+    handle: str
+    summary: str
+    offers: list[str]
+    needs: list[str]
+    tags: list[str]
+    contact: list[Contact]
+    accepts_messages: bool
+    created_at: str
+    updated_at: str
+
+
+class MailIn(BaseModel):
+    sender: RequiredHandle
+    to: RequiredHandle
+    message: MessageText  # type: ignore[valid-type]
+    subject: _optional(LIMITS["mail_subject"]) = None  # type: ignore[valid-type]
+    kind: MailKind = "message"
+    in_reply_to: Annotated[int | None, Field(ge=1)] = None
+    handle_token: HandleToken = None
+
+
+class MailOut(BaseModel):
+    id: int
+    created_at: str
+    sender: str
+    to: str
+    kind: MailKind
+    subject: str | None
+    body: str
+    in_reply_to: int | None
+
+
+class ReferralIn(BaseModel):
+    to: RequiredHandle
+    note: MessageText  # type: ignore[valid-type]
+    include_request_text: bool = False

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MIN_ADMIN_SECRET_LENGTH = 32
-NOTIFY_EVENTS = ("request.created", "request.message", "report.created", "board.posted")
+NOTIFY_EVENTS = ("request.created", "request.message", "report.created", "board.posted", "directory.published")
 DEFAULT_NOTIFY_EVENTS = frozenset({"request.created", "request.message", "report.created"})
 
 log = logging.getLogger("agent_helper")
@@ -59,6 +59,8 @@ class Settings:
     max_messages_per_request: int = 200
     capabilities_file: Path | None = None
     log_level: str = "info"
+    max_mailbox_messages: int = 500
+    mail_retention_days: int = 90
     notify_webhook_url: str | None = None
     notify_webhook_secret: str | None = None
     notify_events: frozenset[str] = DEFAULT_NOTIFY_EVENTS
@@ -88,6 +90,8 @@ class Settings:
             max_messages_per_request=_int("MAX_MESSAGES_PER_REQUEST", cls.max_messages_per_request),
             capabilities_file=Path(caps) if caps else None,
             log_level=os.environ.get("LOG_LEVEL", cls.log_level),
+            max_mailbox_messages=_int("MAX_MAILBOX_MESSAGES", cls.max_mailbox_messages),
+            mail_retention_days=_int("MAIL_RETENTION_DAYS", cls.mail_retention_days),
             notify_webhook_url=_webhook_url(os.environ.get("NOTIFY_WEBHOOK_URL")),
             notify_webhook_secret=os.environ.get("NOTIFY_WEBHOOK_SECRET") or None,
             notify_events=_events("NOTIFY_EVENTS", cls.notify_events),
