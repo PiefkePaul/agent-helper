@@ -189,6 +189,16 @@ class _TLSServer:
                 if not chunk:
                     return
                 data += chunk
+            # Read the whole body too: closing with unread data makes the kernel send a reset.
+            head, _, rest = data.partition(b"\r\n\r\n")
+            lengths = [
+                int(line.split(b":")[1]) for line in head.split(b"\r\n") if line.lower().startswith(b"content-length")
+            ]
+            while len(rest) < (lengths[0] if lengths else 0):
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                rest += chunk
             self.requests.append(data)
             if self.response is None:
                 time.sleep(3)  # hang
