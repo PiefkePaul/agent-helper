@@ -66,7 +66,14 @@ def test_start_read_and_answer_a_task(client, admin_headers):
     assert rpc(client, "SendMessage", user_message("x", taskId=task["id"])).json()["error"]["code"] == -32001
 
     closed = rpc(client, "CancelTask", {"id": task["id"]}, token=token).json()["result"]
-    assert closed["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert closed["status"]["state"] == "TASK_STATE_CANCELED"
+    # A canceled task stays canceled: no second cancel, no new messages.
+    assert rpc(client, "CancelTask", {"id": task["id"]}, token=token).json()["error"]["code"] == -32002
+    again = rpc(client, "SendMessage", user_message("one more", taskId=task["id"]), token=token)
+    assert again.json()["error"]["code"] == -32004
+    assert rpc(client, "GetTask", {"id": task["id"]}, token=token).json()["result"]["status"]["state"] == (
+        "TASK_STATE_CANCELED"
+    )
     # The same conversation is visible over the plain HTTP API.
     r = client.get(f"/v1/requests/{task['id']}", headers={"Authorization": f"Bearer {token}"})
     assert r.json()["status"] == "closed" and len(r.json()["messages"]) == 3
@@ -99,11 +106,14 @@ def test_only_text_parts_and_user_role(client):
         "ListTasks",
         "SubscribeToTask",
         "GetExtendedAgentCard",
-        "CreateTaskPushNotificationConfig",
     ],
 )
 def test_unsupported_operations(client, method):
     assert rpc(client, method).json()["error"]["code"] == -32004
+
+
+def test_push_is_not_supported(client):
+    assert rpc(client, "CreateTaskPushNotificationConfig").json()["error"]["code"] == -32003
 
 
 def test_protocol_errors(client):
@@ -115,16 +125,38 @@ def test_protocol_errors(client):
         "/a2a", json={"jsonrpc": "2.0", "id": 1, "method": "GetTask"}, headers={"Origin": "https://evil.example"}
     )
     assert r.status_code == 403
-    # Without a version header the request is still served.
+    # A missing or empty version means 0.3, which is not served.
     r = client.post("/a2a", json={"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": user_message("hi")})
+    assert r.json()["error"]["code"] == -32009
+    assert rpc(client, "GetTask", headers={"A2A-Version": ""}).json()["error"]["code"] == -32009
+    # The version may also come as a query parameter.
+    r = client.post(
+        "/a2a?A2A-Version=1.0", json={"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": user_message("hi")}
+    )
     assert "result" in r.json()
+    # Errors without a usable id carry "id": null; notifications get no answer.
+    assert client.post("/a2a", content=b"{bad").json() == {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {"code": -32700, "message": "parse error: send one JSON-RPC 2.0 request"},
+    }
+    r = client.post("/a2a", json={"jsonrpc": "2.0", "method": "SendMessage"}, headers={"A2A-Version": "1.0"})
+    assert r.status_code == 202 and r.content == b""
+    # The same origin with an explicit default port is fine.
+    r = rpc(client, "GetTask", {"id": "x"}, headers={"Origin": "http://testserver:80"})
+    assert r.status_code == 200
 
 
 def test_writes_spend_the_write_budget(make_client):
     client = make_client(write_per_minute=2, global_write_per_minute=100)
+    # Rejected calls do not spend it.
+    for _ in range(3):
+        bad = {"message": {"messageId": "m", "role": "ROLE_USER", "parts": [{"url": "x"}]}}
+        assert rpc(client, "SendMessage", bad).json()["error"]["code"] == -32005
     start(client)
     start(client)
     r = rpc(client, "SendMessage", user_message("third"))
+    assert r.status_code == 429 and int(r.headers["retry-after"]) >= 1
     assert "rate limit" in r.json()["error"]["message"]
     # Reads are not charged as writes.
     assert rpc(client, "GetTask", {"id": "req_x"}, token="t").json()["error"]["code"] == -32001  # noqa: S106
@@ -141,3 +173,30 @@ def test_discovery_mentions_a2a(client):
     desc = client.get("/.well-known/agent-helper.json").json()
     assert desc["adapters"]["a2a"]["agent_card"] == "http://testserver/.well-known/agent-card.json"
     assert "/a2a" in client.get("/llms.txt").text
+
+
+def test_more_validation(client):
+    r = rpc(client, "SendMessage", {"message": {"messageId": "m", "role": "ROLE_USER", "parts": [{"text": ""}]}})
+    assert r.json()["error"]["code"] == -32602
+    both = {"message": {"messageId": "m", "role": "ROLE_USER", "parts": [{"text": "x", "raw": "eA=="}]}}
+    assert rpc(client, "SendMessage", both).json()["error"]["code"] == -32005
+    task = start(client)
+    token = task["metadata"]["followUpToken"]
+    mismatch = user_message("x", taskId=task["id"], contextId="req_other")
+    assert rpc(client, "SendMessage", mismatch, token=token).json()["error"]["code"] == -32602
+    images_only = {**user_message("x"), "configuration": {"acceptedOutputModes": ["image/png"]}}
+    assert rpc(client, "SendMessage", images_only).json()["error"]["code"] == -32005
+
+
+def test_agent_close_notifies_the_operator(make_client):
+    from agent_helper.notify import Delivery
+
+    client = make_client(notify_webhook_url="https://hooks.example.invalid/x")
+    events = []
+    client.app.state.notifier.transport = lambda url, body, headers: (
+        events.append(__import__("json").loads(body)["event"]) or Delivery(ok=True, status=200)
+    )
+    task = start(client)
+    rpc(client, "CancelTask", {"id": task["id"]}, token=task["metadata"]["followUpToken"])
+    assert client.app.state.notifier.flush()
+    assert events == ["request.created", "request.closed"]
