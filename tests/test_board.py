@@ -105,11 +105,12 @@ def test_verifier_warns_about_entries_withheld_without_a_reason(client, admin_he
     assert result.ok and result.warnings == ("entry 3 is withheld without a public reason",)
 
 
-def test_console_verify_shows_the_warning(client, admin_headers):
+def test_console_verify_shows_the_warning(make_client):
     import re
 
     from conftest import ADMIN_SECRET
 
+    client = make_client(admin_cookie_secure=False)  # the test client speaks plain http (see #20)
     client.post("/v1/board", json={"content": "x"})
     store = client.app.state.store
     with store._lock:
