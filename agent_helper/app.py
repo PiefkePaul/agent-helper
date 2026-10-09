@@ -93,7 +93,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     store = Store(
         settings.db_path,
         on_event=lambda event, **fields: app.state.notifier.emit(event, **fields),
-        instance=settings.public_base_url,
     )
 
     @asynccontextmanager
@@ -164,11 +163,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         headers = {**link_header, "Vary": "Accept"}
         if "text/html" in request.headers.get("accept", ""):
             return HTMLResponse(discovery.html_page(settings), headers=headers)
-        return PlainTextResponse(discovery.llms_txt(settings), headers=headers)
+        return PlainTextResponse(discovery.llms_txt(settings, store.instance), headers=headers)
 
     @app.get("/llms.txt", include_in_schema=False)
     def llms() -> PlainTextResponse:
-        return PlainTextResponse(discovery.llms_txt(settings), headers=link_header)
+        return PlainTextResponse(discovery.llms_txt(settings, store.instance), headers=link_header)
 
     @app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
     def robots() -> str:
@@ -196,7 +195,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/.well-known/agent-helper.json", tags=["discovery"])
     def well_known() -> dict[str, Any]:
-        return discovery.description(settings)
+        return discovery.description(settings, store.instance)
 
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> dict[str, str]:
@@ -519,7 +518,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         registered, challenge = store.create_challenge(handle)
         statement = {
             "purpose": "agent-helper/recover",
-            "instance": settings.public_base_url,
+            "instance": store.instance,
             "handle": registered,
             "challenge": challenge,
         }

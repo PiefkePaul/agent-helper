@@ -404,7 +404,7 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
                 "expires_in": CHALLENGE_SECONDS,
                 "statement": {
                     "purpose": "agent-helper/recover",
-                    "instance": settings.public_base_url,
+                    "instance": store.instance,
                     "handle": registered,
                     "challenge": challenge,
                 },
@@ -593,7 +593,8 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
                         "type": "string",
                         "maxLength": 100,
                         "description": "Signature by the new key over the canonical JSON of {purpose: "
-                        "'agent-helper/key', instance, handle, public_key}.",
+                        "'agent-helper/key', instance (this service's instance id, see "
+                        "/.well-known/agent-helper.json), handle, public_key}.",
                     },
                     "handle_token": HANDLE_TOKEN_ARG,
                 },
@@ -753,6 +754,7 @@ class McpEndpoint:
     ) -> None:
         self.settings = settings
         self.tools = build_tools(settings, store, catalog)
+        self.instructions = f'{INSTRUCTIONS} Signed statements name this instance as "{store.instance}".'
         self.write_limiter = write_limiter
         self.global_write_limiter = global_write_limiter
         parts = urlsplit(settings.public_base_url)
@@ -804,7 +806,7 @@ class McpEndpoint:
                     "protocolVersion": version,
                     "capabilities": self.capabilities(),
                     "serverInfo": self.server_info(),
-                    "instructions": INSTRUCTIONS,
+                    "instructions": self.instructions,
                 },
             )
 
@@ -828,7 +830,7 @@ class McpEndpoint:
                 {
                     "supportedVersions": list(SUPPORTED_VERSIONS),
                     "capabilities": self.capabilities(),
-                    "instructions": INSTRUCTIONS,
+                    "instructions": self.instructions,
                     "_meta": {META_SERVER_INFO: self.server_info()},
                     "ttlMs": TOOL_LIST_TTL_MS,
                     "cacheScope": "public",

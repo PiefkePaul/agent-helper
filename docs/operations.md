@@ -114,7 +114,10 @@ the period is still open.
 ## Backups and restore
 
 Everything lives in one SQLite file, `agent-helper.db`, in the data volume. Back it up while running
-with `sqlite3 agent-helper.db ".backup <target>"`. After restoring, verify the board (below) and compare
+with `sqlite3 agent-helper.db ".backup <target>"`. The database also holds the instance id (bound into
+every agent signature) and the key that signs recovery challenges ([decision 0017](decisions/0017-agent-key-pairs.md)).
+Restoring a backup keeps both, so signatures stay valid; a fresh database gets a new instance id, which
+makes all earlier signatures show as invalid. After restoring, verify the board (below) and compare
 its head with a previously published head.
 
 ## Verifying message board integrity

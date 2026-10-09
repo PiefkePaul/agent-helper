@@ -8,7 +8,7 @@ import agent_helper.store as store_module
 from agent_helper import keys
 from agent_helper.board import verify_chain
 
-INSTANCE = "http://testserver"
+INSTANCE = ""  # set per test from the store; see the instance fixture
 
 
 class Agent:
@@ -22,8 +22,8 @@ class Agent:
     def sign(self, statement: bytes) -> str:
         return base64.b64encode(self.private.sign(statement)).decode()
 
-    def proof(self, handle: str, instance: str = INSTANCE) -> str:
-        return self.sign(keys.key_statement(instance, handle, self.public))
+    def proof(self, handle: str, instance: str | None = None) -> str:
+        return self.sign(keys.key_statement(instance or INSTANCE, handle, self.public))
 
     def note(self, author: str, content: str, topic: str | None = None, tags: list[str] | None = None) -> str:
         return self.sign(keys.board_statement(INSTANCE, author, topic, content, tags or []))
@@ -37,6 +37,14 @@ def _register(client, handle, agent, token=None, proof=None):
     if token:
         body["handle_token"] = token
     return client.post(f"/v1/handles/{handle}/keys", json=body)
+
+
+@pytest.fixture(autouse=True)
+def instance(client):
+    global INSTANCE
+    INSTANCE = client.app.state.store.instance
+    assert INSTANCE.startswith("ah-")
+    return INSTANCE
 
 
 @pytest.fixture
@@ -312,3 +320,46 @@ def test_mcp_key_tools(client):
     assert call(client, "post_board", note)["structuredContent"]["signature_status"] == "valid"
     again = {"handle": "vega", "public_key": agent.public, "proof": agent.proof("vega")}
     assert call(client, "register_key", again)["isError"] is True
+
+
+def test_signatures_survive_a_change_of_public_url(make_client):
+    first = make_client(public_base_url="https://agents.example.invalid")
+    global INSTANCE
+    INSTANCE = first.app.state.store.instance
+    agent = Agent()
+    token = _register(first, "nova", agent).json()["handle_token"]
+    body = {
+        "content": "x",
+        "author": "nova",
+        "handle_token": token,
+        "key_id": agent.key_id,
+        "signature": agent.note("nova", "x"),
+    }
+    seq = first.post("/v1/board", json=body).json()["seq"]
+    first.__exit__(None, None, None)
+
+    moved = make_client(public_base_url="https://NEW-NAME.example.invalid/")
+    assert moved.app.state.store.instance == INSTANCE
+    assert moved.get(f"/v1/board/{seq}").json()["signature_status"] == "valid"
+    assert moved.get("/.well-known/agent-helper.json").json()["instance_id"] == INSTANCE
+    assert INSTANCE in moved.get("/llms.txt").text
+
+
+def test_a_challenge_survives_a_restart(make_client):
+    first = make_client()
+    global INSTANCE
+    INSTANCE = first.app.state.store.instance
+    agent = Agent()
+    _register(first, "nova", agent)
+    challenge = first.post("/v1/handles/nova/recovery-challenges").json()["challenge"]
+    first.__exit__(None, None, None)
+
+    restarted = make_client()
+    assert _recover(restarted, "nova", challenge, agent.recover("nova", challenge)).status_code == 200
+
+
+def test_mcp_instructions_name_the_instance(client):
+    from test_mcp import modern
+
+    instructions = modern(client, "server/discover").json()["result"]["instructions"]
+    assert client.app.state.store.instance in instructions

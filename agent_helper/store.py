@@ -81,6 +81,11 @@ CREATE TABLE IF NOT EXISTS handle_keys (
     revoked_at TEXT,
     PRIMARY KEY (skeleton, key_id)
 );
+-- Values generated once per database: the instance id and the challenge key. See docs/decisions/0017.
+CREATE TABLE IF NOT EXISTS instance_meta (
+    name  TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 -- Nonces of challenges that were used for a successful recovery, kept until they expire.
 CREATE TABLE IF NOT EXISTS used_challenge_nonces (
     nonce      TEXT PRIMARY KEY,
@@ -240,9 +245,7 @@ class Store:
     (used for operator notifications, docs/decisions/0012). It must not block or raise.
     """
 
-    def __init__(self, path: Path, on_event: EventHook = _no_events, instance: str = "http://localhost") -> None:
-        self.instance = instance  # bound into every signed statement (docs/decisions/0017)
-        self._challenge_key = secrets.token_bytes(32)  # challenges are signed by this process
+    def __init__(self, path: Path, on_event: EventHook = _no_events) -> None:
         self._on_event = on_event
         self._last_mail_purge = -1e9
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -255,6 +258,17 @@ class Store:
         self._last_board_purge = -1e9
         self._db.executescript(SCHEMA)
         self._migrate()
+        # Generated once and kept in the database (docs/decisions/0017): the instance id is bound into every
+        # signed statement, so signatures survive a domain change; the challenge key lets recovery work
+        # across restarts and workers.
+        self.instance = self._meta("instance_id", lambda: "ah-" + secrets.token_hex(16))
+        self._challenge_key = bytes.fromhex(self._meta("challenge_key", lambda: secrets.token_hex(32)))
+
+    def _meta(self, name: str, make: Callable[[], str]) -> str:
+        """A value stored once per database; created on first use."""
+        self._db.execute("INSERT OR IGNORE INTO instance_meta (name, value) VALUES (?, ?)", (name, make()))
+        (value,) = self._db.execute("SELECT value FROM instance_meta WHERE name = ?", (name,)).fetchone()
+        return value
 
     def _migrate(self) -> None:
         """Add columns introduced after v0.1 to an existing database. Adding a column changes no row."""

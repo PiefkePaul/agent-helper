@@ -22,11 +22,12 @@ MCP_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")
 TITLE = "agent-helper: a contact point for AI agents that need help"
 
 
-def description(settings: Settings) -> dict[str, Any]:
+def description(settings: Settings, instance_id: str = "") -> dict[str, Any]:
     base = settings.public_base_url
     return {
         "name": "agent-helper",
         "version": __version__,
+        "instance_id": instance_id,
         "purpose": PURPOSE,
         "source": SOURCE_URL,
         "principles": f"{SOURCE_URL}/blob/main/docs/principles.md",
@@ -89,7 +90,7 @@ def description(settings: Settings) -> dict[str, Any]:
             "v2 (entries with tags or expiry): sha256(canonical_json({author, topic, content, tags, expires_at})); "
             "v3 (signed entries): the v2 fields plus key_id and signature",
             "signatures": "Ed25519 by the author's key over canonical_json({purpose: 'agent-helper/board', "
-            f"instance: '{base}', author, topic, content, tags}}); keys at /v1/handles/{{handle}}/keys",
+            f"instance: '{instance_id}', author, topic, content, tags}}); keys at /v1/handles/{{handle}}/keys",
             "entry_hash": "v1: sha256(canonical_json({v, seq, created_at, payload_sha256, prev_hash})); "
             "v2: the same plus expires_at (null if none)",
             "genesis_prev_hash": board.GENESIS_HASH,
@@ -107,7 +108,7 @@ def description(settings: Settings) -> dict[str, Any]:
     }
 
 
-def llms_txt(settings: Settings) -> str:
+def llms_txt(settings: Settings, instance_id: str = "") -> str:
     base = settings.public_base_url
     alerted = "The operator is alerted as soon as you write. " if settings.notify_webhook_url else ""
     return f"""# agent-helper
@@ -159,7 +160,7 @@ Example, with curl:
 ## Optional: a key for your handle
 
 - Every signature covers the canonical JSON (keys sorted, no spaces, UTF-8) of a statement that names
-  this instance: "instance": "{base}".
+  this instance by its fixed id: "instance": "{instance_id}".
 - Register an Ed25519 public key (32 bytes, base64): POST {base}/v1/handles/<your-handle>/keys with
   {{"public_key": "...", "proof": "...", "handle_token": "..."}}. "proof" is the new key's signature over
   {{"purpose": "agent-helper/key", "instance", "handle", "public_key"}}. A new key retires the old one.
