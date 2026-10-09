@@ -9,8 +9,9 @@ def _csrf(html: str) -> str:
 
 
 @pytest.fixture
-def console(client):
-    """A client logged in to the console. Returns (client, csrf)."""
+def console(make_client):
+    """A client logged in to the console over plain http. Returns (client, csrf)."""
+    client = make_client(admin_cookie_secure=False)  # the test client speaks plain http
     r = client.post("/admin/login", data={"secret": ADMIN_SECRET}, follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"] == "/admin/console"
     cookie = r.headers["set-cookie"]
@@ -320,3 +321,50 @@ def test_serve_binds_both_ports():
     finally:
         a.close()
         b.close()
+
+
+def test_purge_from_the_console(console):
+    client, csrf = console
+    client.post("/v1/board", json={"content": "to be removed"})
+    r = client.post("/admin/console/board/1/purge", data={"csrf": csrf, "reason": "court order", "confirm": "PURGE"})
+    assert "type PURGE 1" in r.text
+    assert client.get("/v1/board/1").json()["content"] == "to be removed"
+    r = client.post("/admin/console/board/1/purge", data={"csrf": csrf, "reason": "court order", "confirm": "PURGE 1"})
+    assert "purged" in r.text
+    assert client.get("/v1/board/1").json()["hidden_reason"] == "Removed for legal reasons: court order"
+
+
+def _login_cookie(client) -> str:
+    r = client.post("/admin/login", data={"secret": ADMIN_SECRET}, follow_redirects=False)
+    assert r.status_code == 303
+    return r.headers["set-cookie"]
+
+
+def test_cookie_without_secure_only_on_the_admin_port(make_client):
+    # Paul's live path: plain http through a LAN port forward (or SSH tunnel) to ADMIN_PORT. The test client
+    # talks to port 80, so admin_port=80 stands for that port.
+    admin_port = make_client(admin_port=80, public_base_url="https://agents.example.invalid")
+    cookie = _login_cookie(admin_port)
+    assert "Secure" not in cookie and "HttpOnly" in cookie
+    assert admin_port.get("/admin/console").status_code == 200  # no login loop
+
+
+def test_cookie_is_secure_by_default_otherwise(make_client):
+    from fastapi.testclient import TestClient
+
+    client = make_client()  # no admin port
+    assert "Secure" in _login_cookie(client)
+    # A localhost name proves nothing: a plain proxy_pass to 127.0.0.1 looks the same.
+    assert "Secure" in _login_cookie(TestClient(client.app, base_url="http://localhost"))
+    assert "Secure" in _login_cookie(TestClient(client.app, base_url="http://127.0.0.1"))
+    assert "Secure" in _login_cookie(TestClient(client.app, base_url="https://testserver"))
+    assert "Secure" in _login_cookie(make_client(admin_cookie_secure=True, admin_port=80))
+    assert "Secure" not in _login_cookie(make_client(admin_cookie_secure=False))
+
+
+def test_cookie_secure_setting(monkeypatch):
+    from agent_helper.config import Settings
+
+    for raw, expected in (("auto", None), ("", None), ("true", True), ("false", False)):
+        monkeypatch.setenv("ADMIN_COOKIE_SECURE", raw)
+        assert Settings.from_env().admin_cookie_secure is expected

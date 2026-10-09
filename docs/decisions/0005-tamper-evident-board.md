@@ -23,9 +23,13 @@ must still be able to hide abusive or unlawful content without breaking verifica
 4. In storage, the chain table is append-only (database triggers reject updates and deletes), and
    payloads cannot be updated.
 5. **Moderation hides, it does not rewrite.** A hidden entry keeps its place, its hashes, and a public
-   reason; only the payload is withheld. Verification of the chain still succeeds.
-6. **Not in v0.1:** publishing signed or externally timestamped checkpoints of the head, and purging a
-   payload from storage for legal reasons. Both are planned.
+   reason; only the payload is withheld. Verification of the chain still succeeds. An entry withheld
+   without a reason (for example a payload deleted directly in the database) also still links, so the
+   reference verifier reports it as a warning; such an entry is a sign of silent removal (added
+   2026-10-09).
+6. **Not in v0.1:** publishing signed or externally timestamped checkpoints of the head (still
+   planned), and purging a payload from storage for legal reasons (since
+   [0018](0018-legal-purge-of-board-payloads.md)).
 7. **Interim decision on anchoring (2026-10-08):** the head will later be anchored by committing
    periodic checkpoints (`seq`, `entry_hash`, time) to a public git repository, so that copies exist
    outside the operator's database and their history is public. The details (signing, frequency, which

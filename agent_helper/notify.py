@@ -107,6 +107,8 @@ def _summary(event: str, fields: dict[str, Any]) -> str:
     match event:
         case "request.created":
             return f"New request {fields['id']}{who}"
+        case "request.closed":
+            return f"Request {fields['id']} closed by the agent{who}"
         case "request.message":
             return f"New message on request {fields['id']}{who}"
         case "report.created":

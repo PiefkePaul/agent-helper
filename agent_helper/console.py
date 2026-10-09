@@ -38,7 +38,7 @@ from .models import (
     ReferralIn,
     ReportDecisionIn,
 )
-from .store import MailLimits, MailRefused, Store
+from .store import MailLimits, MailRefused, PurgeRefused, Store
 
 COOKIE = "agent_helper_console"
 SESSION_SECONDS = 12 * 3600
@@ -260,7 +260,19 @@ def build_console(
 ) -> APIRouter:
     router = APIRouter(include_in_schema=False)
     sessions = Sessions()
-    secure_cookie = settings.public_base_url.lower().startswith("https://")
+
+    def secure_cookie(request: Request) -> bool:
+        """`Secure` by default. The one automatic exception is a plain-http login on the admin port, which is
+        published on the host only (reached by SSH tunnel or a LAN port forward; Safari drops Secure cookies
+        over plain http). Anything else needs ADMIN_COOKIE_SECURE=false: a host name or the absence of proxy
+        headers proves nothing, since a plain proxy_pass to 127.0.0.1 looks exactly like a tunnel."""
+        if settings.admin_cookie_secure is not None:
+            return settings.admin_cookie_secure
+        if request.url.scheme == "https":
+            return True
+        server = request.scope.get("server")
+        on_admin_port = settings.admin_port is not None and server is not None and server[1] == settings.admin_port
+        return not on_admin_port
 
     def enabled() -> None:
         if not settings.admin_enabled:
@@ -357,7 +369,7 @@ def build_console(
             max_age=SESSION_SECONDS,
             path="/admin",
             httponly=True,
-            secure=secure_cookie,
+            secure=secure_cookie(request),
             samesite="strict",
         )
         return response
@@ -670,6 +682,13 @@ def build_console(
                 else f'<form method="post" action="/admin/console/board/{x["seq"]}/hide">{_csrf(csrf)}'
                 '<input type="text" name="reason" required maxlength="2000" placeholder="public reason to hide"> '
                 "<button>Hide</button></form>"
+                f'<details><summary class="note">Remove for legal reasons…</summary>'
+                f'<form method="post" action="/admin/console/board/{x["seq"]}/purge">{_csrf(csrf)}'
+                '<p class="note">Deletes the text for good. The entry stays in the chain with your public reason. '
+                "This cannot be undone.</p>"
+                '<input type="text" name="reason" required maxlength="2000" placeholder="public reason"> '
+                f'<input type="text" name="confirm" required maxlength="40" placeholder="type PURGE {x["seq"]}"> '
+                "<button>Purge</button></form></details>"
             )
             author = "operator" if x["author"] == OPERATOR_HANDLE else agent_word(x["author"])
             meta = f"#{x['seq']} · v{x['v']} · {e(x['created_at'])} · {author}"
@@ -732,6 +751,19 @@ def build_console(
             raise HTTPException(404, "no such entry")
         return _redirect("/admin/console/board", "Entry hidden; its hashes stay public.")
 
+    def purge_board(request: Request, form: dict[str, str]) -> Response:
+        seq = int(request.path_params["seq"])
+        body = _parse(HideIn, {"reason": form.get("reason", "")})
+        if seq > MAX_ID or form.get("confirm", "") != f"PURGE {seq}":
+            return _redirect("/admin/console/board", f"Not purged: type PURGE {seq} to confirm.", error=True)
+        try:
+            entry = store.purge_board_payload(seq, body.reason)
+        except PurgeRefused as exc:
+            return _redirect("/admin/console/board", str(exc), error=True)
+        if entry is None:
+            raise HTTPException(404, "no such entry")
+        return _redirect("/admin/console/board", f"Entry #{seq} purged; its hashes and the reason stay public.")
+
     def verify(request: Request, form: dict[str, str]) -> Response:
         entries: list[dict[str, Any]] = []
         after = 0
@@ -742,6 +774,10 @@ def build_console(
                 break
             after = page[-1]["seq"]
         result = board.verify_chain(entries)
+        if result.ok and result.warnings:
+            listed = "; ".join(result.warnings[:5]) + (" …" if len(result.warnings) > 5 else "")
+            msg = f"Chain verified: {result.checked} entries, but {len(result.warnings)} warning(s): {listed}"
+            return _redirect("/admin/console/board", msg, error=True)
         if result.ok:
             return _redirect("/admin/console/board", f"Chain verified: {result.checked} entries, head matches.")
         return _redirect("/admin/console/board", f"Chain broken at #{result.failed_seq}: {result.error}", error=True)
@@ -749,6 +785,7 @@ def build_console(
     router.add_api_route("/admin/console/board", action(post_board), methods=["POST"])
     router.add_api_route("/admin/console/board/verify", action(verify), methods=["POST"])
     router.add_api_route("/admin/console/board/{seq:int}/hide", action(hide_board), methods=["POST"])
+    router.add_api_route("/admin/console/board/{seq:int}/purge", action(purge_board), methods=["POST"])
 
     # --- log ------------------------------------------------------------------------------------------
 

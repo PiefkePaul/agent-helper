@@ -91,6 +91,18 @@ CREATE TABLE IF NOT EXISTS used_challenge_nonces (
     nonce      TEXT PRIMARY KEY,
     expires_at REAL NOT NULL
 );
+-- Payloads deleted for legal reasons; append-only record. See docs/decisions/0018.
+CREATE TABLE IF NOT EXISTS board_purged (
+    seq        INTEGER PRIMARY KEY REFERENCES board_chain (seq),
+    purged_at  TEXT NOT NULL,
+    reason     TEXT NOT NULL,
+    -- The expiry is part of the version 2+ entry hash, so it must outlive the deleted payload.
+    expires_at TEXT
+);
+CREATE TRIGGER IF NOT EXISTS board_purged_no_update BEFORE UPDATE ON board_purged
+BEGIN SELECT RAISE(ABORT, 'board_purged is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS board_purged_no_delete BEFORE DELETE ON board_purged
+BEGIN SELECT RAISE(ABORT, 'board_purged is append-only'); END;
 -- Lower-cased topic and text of visible payloads, for search (docs/decisions/0015).
 CREATE TABLE IF NOT EXISTS board_search (
     seq  INTEGER PRIMARY KEY REFERENCES board_chain (seq),
@@ -194,6 +206,10 @@ class HandleUnavailable(Exception):
     """The handle is reserved, or registered and the given handle token does not match."""
 
 
+class PurgeRefused(Exception):
+    """A purge was refused (the payload is already gone)."""
+
+
 class ConversationFull(Exception):
     """The conversation reached its message cap."""
 
@@ -276,6 +292,8 @@ class Store:
             "board_chain": [("v", "INTEGER NOT NULL DEFAULT 1")],
             "board_payloads": [("tags", "TEXT"), ("expires_at", "TEXT"), ("key_id", "TEXT"), ("signature", "TEXT")],
             "mail": [("key_id", "TEXT"), ("signature", "TEXT")],
+            "board_purged": [("expires_at", "TEXT")],
+            "requests": [("closed_by", "TEXT")],
         }
         for table, columns in added.items():
             present = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
@@ -370,6 +388,7 @@ class Store:
             "handle": row["handle"],
             "contact_hint": row["contact_hint"],
             "messages": [dict(m) for m in msgs],
+            "closed_by": row["closed_by"],
         }
 
     def get_request(self, req_id: str, token: str) -> dict[str, Any] | None:
@@ -391,10 +410,22 @@ class Store:
                 "INSERT INTO request_messages (request_id, sender, created_at, body) VALUES (?, 'agent', ?, ?)",
                 (req_id, now(), body),
             )
-            self._db.execute("UPDATE requests SET status = 'open' WHERE id = ?", (req_id,))
+            self._db.execute("UPDATE requests SET status = 'open', closed_by = NULL WHERE id = ?", (req_id,))
             row = self._db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
             view = self._request_view(row)
         self._on_event("request.message", id=req_id, handle=view["handle"], preview=body)
+        return view
+
+    def close_request(self, req_id: str, token: str) -> dict[str, Any] | None:
+        """The agent closes its own request (A2A CancelTask). None: wrong id or token."""
+        with self._tx():
+            row = self._check_token("requests", req_id, token)
+            if row is None:
+                return None
+            self._db.execute("UPDATE requests SET status = 'closed', closed_by = 'agent' WHERE id = ?", (req_id,))
+            row = self._db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
+            view = self._request_view(row)
+        self._on_event("request.closed", id=req_id, handle=view["handle"])
         return view
 
     def get_request_admin(self, req_id: str) -> dict[str, Any] | None:
@@ -421,7 +452,8 @@ class Store:
                 "INSERT INTO request_messages (request_id, sender, created_at, body) VALUES (?, 'operator', ?, ?)",
                 (req_id, now(), body),
             )
-            self._db.execute("UPDATE requests SET status = ? WHERE id = ?", (status, req_id))
+            closed_by = "operator" if status == "closed" else None
+            self._db.execute("UPDATE requests SET status = ?, closed_by = ? WHERE id = ?", (status, closed_by, req_id))
             row = self._db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
             return self._request_view(row)
 
@@ -538,10 +570,11 @@ class Store:
     _BOARD_SELECT = (
         "SELECT c.seq, c.v, c.created_at, c.payload_sha256, c.prev_hash, c.entry_hash,"
         " p.author, p.topic, p.content, p.tags, p.expires_at, p.key_id, p.signature,"
-        " h.reason AS hidden_reason, x.expires_at AS expired_at"
+        " h.reason AS hidden_reason, x.expires_at AS expired_at, pg.purged_expires_at"
         " FROM board_chain c LEFT JOIN board_payloads p ON p.seq = c.seq"
         " LEFT JOIN board_hidden h ON h.seq = c.seq"
         " LEFT JOIN board_expired x ON x.seq = c.seq"
+        " LEFT JOIN (SELECT seq, expires_at AS purged_expires_at FROM board_purged) pg ON pg.seq = c.seq"
     )
 
     def _board_entries(self, after: int = 0, only_seq: int | None = None, limit: int = -1) -> list[dict[str, Any]]:
@@ -552,7 +585,7 @@ class Store:
         return [self._board_view(r) for r in rows]
 
     def _board_view(self, r: sqlite3.Row) -> dict[str, Any]:
-        expires_at = r["expires_at"] or r["expired_at"]
+        expires_at = r["expires_at"] or r["expired_at"] or r["purged_expires_at"]
         # Only version 2 entries can expire (their expiry is hashed); a missing v1 payload shows as hidden.
         expired = r["v"] >= 2 and (r["expired_at"] is not None or (expires_at is not None and expires_at <= now()))
         hidden = r["hidden_reason"] is not None or (r["content"] is None and not expired)
@@ -671,6 +704,34 @@ class Store:
                 " ON CONFLICT (seq) DO UPDATE SET reason = excluded.reason",
                 (seq, now(), reason),
             )
+            return self._board_entries(only_seq=seq)[0]
+
+    def purge_board_payload(self, seq: int, reason: str) -> dict[str, Any] | None:
+        """Delete an entry's payload for good, for legal reasons (docs/decisions/0018). The chain row and
+        hashes stay; the entry is hidden with a public reason; the search copy goes too. None: no such entry.
+        Raises PurgeRefused if the payload is already gone."""
+        with self._tx():
+            if self._db.execute("SELECT 1 FROM board_chain WHERE seq = ?", (seq,)).fetchone() is None:
+                return None
+            if self._db.execute("SELECT 1 FROM board_payloads WHERE seq = ?", (seq,)).fetchone() is None:
+                raise PurgeRefused("this entry's payload is already gone (expired or purged)")
+            ts = now()
+            public_reason = f"Removed for legal reasons: {reason}"
+            self._db.execute(
+                "INSERT INTO board_hidden (seq, hidden_at, reason) VALUES (?, ?, ?)"
+                " ON CONFLICT (seq) DO UPDATE SET reason = excluded.reason",
+                (seq, ts, public_reason),
+            )
+            self._db.execute(
+                "INSERT INTO board_purged (seq, purged_at, reason, expires_at)"
+                " SELECT ?, ?, ?, expires_at FROM board_payloads WHERE seq = ?",
+                (seq, ts, reason, seq),
+            )
+            self._db.execute("DELETE FROM board_search WHERE seq = ?", (seq,))
+            self._db.execute("DELETE FROM board_payloads WHERE seq = ?", (seq,))
+        with self._lock:
+            # secure_delete overwrote the main file; also move the WAL into it so no copy stays there.
+            self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             return self._board_entries(only_seq=seq)[0]
 
     # --- agent directory (docs/decisions/0013) ---------------------------------------------------
