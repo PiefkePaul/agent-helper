@@ -10,6 +10,8 @@ Everything except the catalog is written by agents: it is marked as unverified a
 
 from __future__ import annotations
 
+import threading
+import time
 import unicodedata
 from contextvars import ContextVar
 from typing import Any
@@ -23,6 +25,9 @@ from .store import Store
 MAX_WORDS = 5
 PER_CLIENT_PER_MINUTE = 20
 ALL_CLIENTS_PER_MINUTE = 240
+CACHE_SECONDS = 60.0
+CACHE_ENTRIES = 1000
+DEFAULT_BOARD_WINDOW = 2000
 # Set by the HTTP and MCP entry points; the MCP tool functions do not see the request.
 client: ContextVar[str] = ContextVar("helpdesk_client", default="unknown")
 PER_SECTION = 5
@@ -69,17 +74,34 @@ def need_words(need: str) -> list[str]:
 class Helpdesk:
     """find_help with its own rate limits."""
 
-    def __init__(self, catalog: Catalog, store: Store, base: str) -> None:
+    def __init__(self, catalog: Catalog, store: Store, base: str, board_window: int = DEFAULT_BOARD_WINDOW) -> None:
         self.catalog, self.store, self.base = catalog, store, base
+        self.board_window = board_window
         self.per_client = TokenBucket(PER_CLIENT_PER_MINUTE)
         self.all_clients = TokenBucket(ALL_CLIENTS_PER_MINUTE)
+        # The same need from many agents (or one agent repeating itself) costs one search a minute.
+        self._cache: dict[tuple[str, ...], tuple[float, dict[str, Any]]] = {}
+        self._cache_lock = threading.Lock()
 
     def wait(self) -> float:
         """0 if this call may run now, else seconds until it may."""
         return self.per_client.take(client.get()) or self.all_clients.take("all")
 
     def find(self, need: str) -> dict[str, Any]:
-        return find_help(need, self.catalog, self.store, self.base)
+        key = tuple(need_words(need))
+        now = time.monotonic()
+        with self._cache_lock:
+            hit = self._cache.get(key)
+            if hit is not None and now - hit[0] < CACHE_SECONDS:
+                return hit[1]
+        result = find_help(need, self.catalog, self.store, self.base, self.board_window)
+        with self._cache_lock:
+            if len(self._cache) >= CACHE_ENTRIES:
+                self._cache = {k: v for k, v in self._cache.items() if now - v[0] < CACHE_SECONDS}
+                if len(self._cache) >= CACHE_ENTRIES:
+                    self._cache.clear()
+            self._cache[key] = (now, result)
+        return result
 
 
 def _stem(word: str) -> str:
@@ -108,7 +130,9 @@ def _gather(search: Any, words: list[str], key: str) -> dict[Any, dict[str, Any]
     return found
 
 
-def find_help(need: str, catalog: Catalog, store: Store, base: str) -> dict[str, Any]:
+def find_help(
+    need: str, catalog: Catalog, store: Store, base: str, board_window: int = DEFAULT_BOARD_WINDOW
+) -> dict[str, Any]:
     words = need_words(need)
     out: dict[str, Any] = {
         "need_words": words,
@@ -157,7 +181,7 @@ def find_help(need: str, catalog: Catalog, store: Store, base: str) -> dict[str,
             if s
         ]
 
-        notes = _gather(lambda w: store.search_board(w, None, None, 20, 0), words, "seq")
+        notes = _gather(lambda w: store.search_board(w, None, None, 20, 0, newest=board_window), words, "seq")
         ranked = sorted(
             (
                 (
@@ -195,6 +219,10 @@ def find_help(need: str, catalog: Catalog, store: Store, base: str) -> dict[str,
         ]
 
     out["next_steps"] = _next_steps(out, base)
+    out["notes_scope"] = (
+        f"Only the newest {board_window} board entries are searched here; find older notes with "
+        f"GET {base}/v1/board/search?q=<words>."
+    )
     out["untrusted_sections"] = ["agents", "notes", "capability_requests"]
     out["note"] = (
         "Matches need only some of your words, best first. Agents, notes and capability requests are written "

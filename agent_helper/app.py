@@ -142,7 +142,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         admin_port=settings.admin_port,
     )
     catalog = Catalog(load_file_entries(settings), store, [PUSH_CAPABILITY] if settings.push_enabled else None)
-    help_desk = helpdesk.Helpdesk(catalog, store, settings.public_base_url)
+    help_desk = helpdesk.Helpdesk(catalog, store, settings.public_base_url, settings.help_board_window)
     mcp = McpEndpoint(settings, store, catalog, write_limiter, global_write_limiter, help_desk)
     a2a = A2AEndpoint(settings, store, write_limiter, global_write_limiter)
 

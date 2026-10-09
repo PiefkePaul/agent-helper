@@ -145,3 +145,58 @@ def test_llms_txt_starts_with_the_short_path(client):
     assert text.index("## In one minute") < text.index("## Start here")
     assert "/v1/help?need=" in text
     assert client.get("/.well-known/agent-helper.json").json()["endpoints"]["find_help"]["method"] == "GET"
+
+
+def _bulk_board(store, count: int) -> None:
+    """Fill the board directly (no hash work), for load tests only."""
+    words = ["ocr", "invoice", "scanner", "translation", "crawl", "german", "api", "rate", "limit", "pdf"]
+    chain, payloads, search = [], [], []
+    for seq in range(1, count + 1):
+        text = f"note {seq} about {words[seq % 10]} and {words[(seq * 7) % 10]} with filler text"
+        chain.append((seq, "2026-10-09T10:00:00Z", f"{seq:064x}", f"{seq - 1:064x}", f"h{seq:063x}"))
+        payloads.append((seq, "bulk", "topic", text))
+        search.append((seq, f"topic {text}"))
+    db = store._db
+    db.execute("BEGIN")
+    db.executemany(
+        "INSERT INTO board_chain (seq, created_at, payload_sha256, prev_hash, entry_hash) VALUES (?, ?, ?, ?, ?)",
+        chain,
+    )
+    db.executemany("INSERT INTO board_payloads (seq, author, topic, content) VALUES (?, ?, ?, ?)", payloads)
+    db.executemany("INSERT INTO board_search (seq, text) VALUES (?, ?)", search)
+    db.execute("COMMIT")
+
+
+def test_find_help_stays_fast_with_50000_board_entries(client):
+    import time
+
+    store = client.app.state.store
+    _bulk_board(store, 50_000)
+    worst = 0.0
+    needs = ["ocr invoice scanner german pdf", "nothing matches xyzzy quux plugh", "note filler text about with"]
+    for need in needs:
+        started = time.perf_counter()
+        r = client.get("/v1/help", params={"need": need})
+        worst = max(worst, time.perf_counter() - started)
+        assert r.status_code == 200
+    # Generous for slow CI machines; without the window one call scanned all 50,000 rows per word.
+    assert worst < 1.5, f"slowest find_help call took {worst:.2f}s"
+    notes = client.get("/v1/help", params={"need": "ocr"}).json()
+    assert all(n["seq"] > 48_000 for n in notes["notes"])
+    assert "board/search" in notes["notes_scope"]
+
+
+def test_find_help_caches_the_same_need(client, monkeypatch):
+    from agent_helper import helpdesk
+
+    _seed(client)
+    calls = []
+    real = helpdesk.find_help
+    monkeypatch.setattr(helpdesk, "find_help", lambda *a, **k: calls.append(1) or real(*a, **k))
+    first = client.get("/v1/help", params={"need": "OCR invoices"}).json()
+    again = client.get("/v1/help", params={"need": "invoices, OCR!"}).json()
+    other = client.get("/v1/help", params={"need": "translation"}).json()
+    assert first == client.get("/v1/help", params={"need": "ocr invoices"}).json()
+    # Three different word lists searched; the repeat in other case and punctuation came from the cache.
+    assert len(calls) == 3
+    assert again["need_words"] == ["invoices", "ocr"] and other["need_words"] == ["translation"]
