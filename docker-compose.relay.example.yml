@@ -10,6 +10,8 @@ services:
       - relay.env          # derived from config/relay.env.example, kept outside the repository
     ports:
       - "8090:8090"        # or keep it on loopback behind a TLS-terminating proxy
+      # With RELAY_ALLOWED_CLIENTS the relay must see the real peer: Docker's NAT keeps it, the userland proxy
+      # and reverse proxies do not (see docs/operations.md, "Push notices to agents").
     # dns:                 # a public resolver of your choice, never one with an internal view
     #   - <resolver address>
     healthcheck:           # the image's default check is for the service, not the relay

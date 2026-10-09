@@ -139,6 +139,17 @@ service connects from, with the firewall of the relay's server (or the provider'
 relay authenticates every call anyway; the firewall keeps everyone else from even reaching it. Outbound,
 the relay needs HTTPS to the internet and DNS to its resolver, nothing else.
 
+**Second layer in the relay: `RELAY_ALLOWED_CLIENTS`.** The firewall stays the primary control. In
+addition, the relay can refuse (with a plain 404, before any authentication) every caller whose address
+is not in `RELAY_ALLOWED_CLIENTS`: CIDRs, or host names such as the dynamic DNS name of the service's
+connection, resolved again every 5 minutes. If lookups fail, the last known addresses stay valid for
+`RELAY_ALLOWED_CLIENTS_MAX_STALE` seconds (default 3600); after that the name admits nobody. Without the
+variable the relay behaves as before. The relay checks the TCP peer and never `X-Forwarded-For`; it must
+therefore see the real peer address. That is the case when uvicorn terminates TLS itself and the port is
+published by Docker's normal NAT (not the userland proxy) or the container uses the host network. Behind
+a reverse proxy every call comes from the proxy's address, so restrict there instead; the relay logs a
+warning when it sees a private caller address.
+
 **Rotating `RELAY_SECRET`.** There is one secret, shared by both sides, so a rotation is a short, planned
 interruption of pushes, not of the service:
 

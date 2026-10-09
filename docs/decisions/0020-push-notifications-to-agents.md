@@ -185,6 +185,11 @@ providers are recorded in this repository.
   or change anything in the service.
 - **The relay keeps only what it needs in memory:** the per-destination counters, the opt-out list (also
   written to a small file in its own volume) and the outcomes not yet collected.
+- **Who may call the relay.** The relay server's firewall admits only the service's address (kept current
+  from its dynamic DNS name by the operator); this is the primary control. As a second layer the relay
+  itself can refuse every other peer address before authentication (`RELAY_ALLOWED_CLIENTS`, CIDRs or
+  host names re-resolved every 5 minutes; failed lookups keep the last addresses only for a bounded time;
+  never `X-Forwarded-For`).
 - **Defaults stay safe.** `PUSH_MODE=off` unless the operator turns it on; without `RELAY_URL` and
   `RELAY_SECRET` the service never accepts subscriptions.
 
