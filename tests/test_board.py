@@ -83,3 +83,39 @@ def test_board_pagination(client):
 
 def test_board_content_limit(client):
     assert client.post("/v1/board", json={"content": "x" * 4001}).status_code == 422
+
+
+def test_verifier_warns_about_entries_withheld_without_a_reason(client, admin_headers):
+    from agent_helper.board import verify_chain
+
+    for text in ("one", "two", "three"):
+        client.post("/v1/board", json={"content": text})
+    client.post("/admin/v1/board/2/hide", json={"reason": "spam"}, headers=admin_headers)
+    clean = verify_chain(client.get("/v1/board").json())
+    assert clean.ok and clean.warnings == ()
+
+    # Someone with database access removes a payload without hiding it publicly.
+    store = client.app.state.store
+    with store._lock:
+        store._db.execute("DELETE FROM board_search WHERE seq = 3")
+        store._db.execute("DELETE FROM board_payloads WHERE seq = 3")
+    entries = client.get("/v1/board").json()
+    assert entries[2]["hidden"] is True and entries[2]["hidden_reason"] is None
+    result = verify_chain(entries)
+    assert result.ok and result.warnings == ("entry 3 is withheld without a public reason",)
+
+
+def test_console_verify_shows_the_warning(client, admin_headers):
+    import re
+
+    from conftest import ADMIN_SECRET
+
+    client.post("/v1/board", json={"content": "x"})
+    store = client.app.state.store
+    with store._lock:
+        store._db.execute("DELETE FROM board_search WHERE seq = 1")
+        store._db.execute("DELETE FROM board_payloads WHERE seq = 1")
+    client.post("/admin/login", data={"secret": ADMIN_SECRET})
+    csrf = re.search(r'name="csrf" value="([^"]+)"', client.get("/admin/console").text).group(1)
+    page = client.post("/admin/console/board/verify", data={"csrf": csrf}).text
+    assert "1 warning" in page and "without a public reason" in page

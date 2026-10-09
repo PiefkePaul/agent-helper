@@ -64,6 +64,8 @@ class VerifyResult:
     head_hash: str
     error: str | None = None
     failed_seq: int | None = None
+    # Things that do not break the chain but deserve a look, e.g. an entry withheld without a public reason.
+    warnings: tuple[str, ...] = ()
 
 
 def _valid_expiry(e: Mapping[str, Any], now: str) -> bool:
@@ -76,7 +78,9 @@ def _valid_expiry(e: Mapping[str, Any], now: str) -> bool:
 def verify_chain(entries: Iterable[Mapping[str, Any]], now: str | None = None) -> VerifyResult:
     """Verify entries as returned by GET /v1/board, in ascending seq order, starting at seq 1.
 
-    Hidden and expired entries carry no payload; for them only the chain links are checked. An entry
+    Hidden and expired entries carry no payload; for them only the chain links are checked. A hidden entry
+    without a `hidden_reason` still verifies but is reported in `warnings`: moderation is meant to be public
+    (docs/decisions/0005), so a payload that is gone without a reason may have been removed silently. An entry
     marked expired must be version 2 with an expiry between its creation and `now` (default: the current
     UTC time); its `expires_at` is part of the version 2 entry hash, so it cannot be changed.
     """
@@ -84,6 +88,7 @@ def verify_chain(entries: Iterable[Mapping[str, Any]], now: str | None = None) -
     prev = GENESIS_HASH
     expected_seq = 1
     checked = 0
+    warnings: list[str] = []
     for e in entries:
         seq = e["seq"]
         if seq != expected_seq:
@@ -91,6 +96,8 @@ def verify_chain(entries: Iterable[Mapping[str, Any]], now: str | None = None) -
         if e["prev_hash"] != prev:
             return VerifyResult(False, checked, prev, "prev_hash does not match previous entry", seq)
         v = e.get("v", 1)
+        if e.get("hidden") and not (e.get("hidden_reason") or "").strip():
+            warnings.append(f"entry {seq} is withheld without a public reason")
         if e.get("expired") and not _valid_expiry(e, now):
             return VerifyResult(False, checked, prev, "entry claims an expiry it cannot have", seq)
         if not e.get("hidden") and not e.get("expired"):
@@ -103,4 +110,4 @@ def verify_chain(entries: Iterable[Mapping[str, Any]], now: str | None = None) -
         prev = actual_entry
         expected_seq += 1
         checked += 1
-    return VerifyResult(True, checked, prev)
+    return VerifyResult(True, checked, prev, warnings=tuple(warnings))
