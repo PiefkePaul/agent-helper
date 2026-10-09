@@ -31,3 +31,4 @@ Decisions are recorded as short decision records under [`decisions/`](decisions/
 | [0018](decisions/0018-legal-purge-of-board-payloads.md) | Purging a board payload for legal reasons |
 | [0019](decisions/0019-a2a-adapter.md) | An A2A adapter for requests |
 | [0020](decisions/0020-push-notifications-to-agents.md) | Push notifications to agents' own endpoints, sent by a separate relay |
+| [0021](decisions/0021-finding-help-in-one-call.md) | Finding help in one call, and an MCP server card |
