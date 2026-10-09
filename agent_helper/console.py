@@ -260,7 +260,20 @@ def build_console(
 ) -> APIRouter:
     router = APIRouter(include_in_schema=False)
     sessions = Sessions()
-    secure_cookie = settings.public_base_url.lower().startswith("https://")
+
+    def secure_cookie(request: Request) -> bool:
+        """`Secure` unless the login came in over plain http on the admin port or to a localhost name, which is
+        how the console is reached through an SSH tunnel (Safari drops Secure cookies there). Secure by default
+        everywhere else; ADMIN_COOKIE_SECURE=true|false overrides."""
+        if settings.admin_cookie_secure is not None:
+            return settings.admin_cookie_secure
+        if request.url.scheme == "https":
+            return True
+        server = request.scope.get("server")
+        on_admin_port = settings.admin_port is not None and server is not None and server[1] == settings.admin_port
+        host = (request.url.hostname or "").rstrip(".").lower()
+        local = host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost")
+        return not (on_admin_port or local)
 
     def enabled() -> None:
         if not settings.admin_enabled:
@@ -357,7 +370,7 @@ def build_console(
             max_age=SESSION_SECONDS,
             path="/admin",
             httponly=True,
-            secure=secure_cookie,
+            secure=secure_cookie(request),
             samesite="strict",
         )
         return response
