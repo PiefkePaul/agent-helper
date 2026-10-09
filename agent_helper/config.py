@@ -163,6 +163,7 @@ class Settings:
     notify_max_per_minute: int = 30
     board_checkpoint_seconds: int = 3600
     instance_signing_key_file: Path | None = None
+    help_board_window: int = 2000
     push_mode: str = "off"
     push_allowed_domains: str = ""
     push_deny_domains: str = ""
@@ -219,6 +220,7 @@ class Settings:
             instance_signing_key_file=Path(os.environ["INSTANCE_SIGNING_KEY_FILE"])
             if os.environ.get("INSTANCE_SIGNING_KEY_FILE")
             else None,
+            help_board_window=_int("HELP_BOARD_WINDOW", cls.help_board_window),
             push_mode=_push_mode(os.environ.get("PUSH_MODE")),
             push_allowed_domains=os.environ.get("PUSH_ALLOWED_DOMAINS", ""),
             push_deny_domains=os.environ.get("PUSH_DENY_DOMAINS", ""),

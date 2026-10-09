@@ -773,9 +773,16 @@ class Store:
         self._db.execute("DELETE FROM board_payloads WHERE expires_at IS NOT NULL AND expires_at <= ?", (ts,))
 
     def search_board(
-        self, query: str | None, tag: str | None, author: str | None, limit: int, offset: int
+        self,
+        query: str | None,
+        tag: str | None,
+        author: str | None,
+        limit: int,
+        offset: int,
+        newest: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Visible, unexpired entries, newest first, matching all words, a tag and an author."""
+        """Visible, unexpired entries, newest first, matching all words, a tag and an author. With `newest`,
+        only the newest that many entries of the chain are looked at, so the cost stays bounded."""
         where = [
             "h.seq IS NULL",
             "x.seq IS NULL",
@@ -793,6 +800,9 @@ class Store:
         if author:
             where.append("p.author = ?")
             params.append(author)
+        if newest is not None:
+            where.append("c.seq > (SELECT COALESCE(MAX(seq), 0) FROM board_chain) - ?")
+            params.append(newest)
         sql = (
             f"{self._BOARD_SELECT} JOIN board_search s ON s.seq = c.seq"  # noqa: S608
             f" WHERE {' AND '.join(where)} ORDER BY c.seq DESC LIMIT ? OFFSET ?"
