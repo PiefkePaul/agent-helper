@@ -12,17 +12,18 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import http.client
 import json
 import logging
 import queue
 import secrets
+import socket
 import threading
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import __version__
 from .config import DEFAULT_NOTIFY_EVENTS, Settings
@@ -49,25 +50,49 @@ class Delivery:
 Transport = Callable[[str, bytes, dict[str, str]], Delivery]
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
-        return None  # a webhook that redirects is misconfigured; do not follow it anywhere
-
-
-_opener = urllib.request.build_opener(_NoRedirect)
-
-
 def http_transport(url: str, body: bytes, headers: dict[str, str]) -> Delivery:
-    """POST with the standard library. The URL is never logged: it may contain a secret (a bot token)."""
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")  # noqa: S310 (scheme checked)
+    """POST with an overall deadline. The URL is never logged or put into errors: it may contain a secret.
+
+    A socket timeout only bounds each read, so a receiver that answers one byte at a time could hold a
+    request for a long time. The request runs on a helper thread; at the deadline its socket is closed, which
+    ends that thread too. Redirects are never followed (`http.client` does not follow them).
+    """
+    parts = urlsplit(url)
+    path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    connection_class = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
     try:
-        with _opener.open(req, timeout=TIMEOUT_SECONDS) as resp:
-            return Delivery(ok=200 <= resp.status < 300, status=resp.status)
-    except urllib.error.HTTPError as exc:
-        return Delivery(ok=False, status=exc.code, error=f"HTTP {exc.code}", retry=exc.code == 429 or exc.code >= 500)
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        reason = getattr(exc, "reason", exc)
-        return Delivery(ok=False, error=type(reason).__name__, retry=True)
+        conn = connection_class(parts.hostname or "", parts.port, timeout=TIMEOUT_SECONDS)
+    except Exception as exc:
+        return Delivery(ok=False, error=type(exc).__name__)
+    result: list[Delivery] = []
+
+    def post() -> None:
+        try:
+            conn.request("POST", path, body=body, headers=headers)
+            status = conn.getresponse().status
+            ok = 200 <= status < 300
+            retry = status == 429 or status >= 500
+            result.append(Delivery(ok=ok, status=status, error=None if ok else f"HTTP {status}", retry=retry))
+        except OSError as exc:  # network trouble, including timeouts and the socket closed at the deadline
+            result.append(Delivery(ok=False, error=type(exc).__name__, retry=True))
+        except Exception as exc:  # malformed responses and the like; type name only, never the message
+            result.append(Delivery(ok=False, error=type(exc).__name__))
+
+    worker = threading.Thread(target=post, name="agent-helper-notify-post", daemon=True)
+    worker.start()
+    worker.join(TIMEOUT_SECONDS + 1)
+    if result:
+        conn.close()
+        return result[0]
+    sock = conn.sock
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)  # unblocks a pending read even while the response holds the socket
+        except OSError:
+            pass
+    conn.close()
+    worker.join(1)
+    return Delivery(ok=False, error="deadline exceeded", retry=True)
 
 
 def sign(secret: str, timestamp: str, body: bytes) -> str:

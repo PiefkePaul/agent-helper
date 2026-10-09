@@ -288,3 +288,116 @@ def test_settings_reject_non_http_webhook(monkeypatch):
     settings = Settings.from_env()
     assert settings.notify_webhook_url is None
     assert settings.notify_events == frozenset({"request.created"})
+
+
+def test_slow_dripping_receiver_hits_the_overall_deadline(monkeypatch):
+    import socket
+    import time
+
+    import agent_helper.notify as notify
+
+    monkeypatch.setattr(notify, "TIMEOUT_SECONDS", 0.5)
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    stop = threading.Event()
+
+    def drip():
+        conn, _ = server.accept()
+        conn.recv(65536)
+        conn.sendall(b"HTTP/1.1 200 OK\r\n")
+        while not stop.is_set():
+            try:
+                conn.sendall(b"X-Slow: 1\r\n")
+            except OSError:
+                break
+            time.sleep(0.2)
+        conn.close()
+
+    threading.Thread(target=drip, daemon=True).start()
+    try:
+        started = time.monotonic()
+        result = http_transport(f"http://127.0.0.1:{server.getsockname()[1]}/", b"{}", {})
+        assert time.monotonic() - started < 3
+        assert not result.ok and result.error == "deadline exceeded"
+        # The helper thread ended with the closed connection; nothing piles up.
+        assert not any(t.name == "agent-helper-notify-post" and t.is_alive() for t in threading.enumerate())
+    finally:
+        stop.set()
+        server.close()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://",
+        "https:///path",
+        "ftp://host/x",
+        "http://[::1",
+        "http://h:abc/x",
+        "http://h:99999/x",
+        "https://h/bot123/send Message",
+    ],
+)
+def test_settings_reject_webhook_without_host(monkeypatch, url):
+    from agent_helper.config import Settings
+
+    monkeypatch.setenv("NOTIFY_WEBHOOK_URL", url)
+    assert Settings.from_env().notify_webhook_url is None
+
+
+def test_settings_warn_without_secret_and_on_public_http(monkeypatch, caplog):
+    from agent_helper.config import Settings
+
+    monkeypatch.setenv("NOTIFY_WEBHOOK_URL", "http://hooks.example.org/x")
+    with caplog.at_level("WARNING"):
+        assert Settings.from_env().notify_webhook_url == "http://hooks.example.org/x"
+    assert "NOTIFY_WEBHOOK_SECRET" in caplog.text and "plain http" in caplog.text
+
+    caplog.clear()
+    monkeypatch.setenv("NOTIFY_WEBHOOK_URL", "http://192.168.1.20:5678/webhook/x")
+    monkeypatch.setenv("NOTIFY_WEBHOOK_SECRET", "s")
+    with caplog.at_level("WARNING"):
+        Settings.from_env()
+    assert caplog.text == ""
+
+
+def test_malformed_response_is_reported_without_retry():
+    import socket
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def garbage():
+        conn, _ = server.accept()
+        conn.recv(65536)
+        conn.sendall(b"NOT HTTP AT ALL" + bytes([13, 10, 13, 10]))
+        conn.close()
+
+    threading.Thread(target=garbage, daemon=True).start()
+    try:
+        result = http_transport(f"http://127.0.0.1:{server.getsockname()[1]}/x", b"{}", {})
+        assert not result.ok and not result.retry and result.error == "BadStatusLine"
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize(
+    ("host", "private"),
+    [
+        ("localhost", True),
+        ("localhost.", True),
+        ("nas", True),
+        ("10.0.0.5", True),
+        ("::1", True),
+        ("fe80::1", True),
+        ("2606:4700::1111", False),
+        ("134744072", False),
+        ("hooks.example.org", False),
+    ],
+)
+def test_private_host_detection(host, private):
+    from agent_helper.config import _is_private_host
+
+    assert _is_private_host(host) is private
