@@ -368,6 +368,9 @@ class Store:
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA foreign_keys=ON")
+        # Without this, INSERT OR REPLACE deletes the old row without firing the no-delete triggers that
+        # keep the board, its checkpoints and revocation records unchangeable.
+        self._db.execute("PRAGMA recursive_triggers=ON")
         self._db.execute("PRAGMA secure_delete=ON")  # deleted text (expired notes, purged mail) is overwritten
         self._last_board_purge = -1e9
         self._db.executescript(SCHEMA)

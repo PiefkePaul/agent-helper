@@ -351,3 +351,29 @@ def test_revocation_times_accept_only_one_form(monkeypatch):
         monkeypatch.setenv("REVOKED_KEY_IDS", f"0123456789abcdef@{bad}")
         with pytest.raises(SystemExit):
             Settings.from_env()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "INSERT OR REPLACE INTO board_chain (seq, created_at, payload_sha256, prev_hash, entry_hash, v)"
+        " VALUES (1, 'x', 'x', 'x', 'forged', 1)",
+        "INSERT OR REPLACE INTO board_checkpoints (seq, entry_hash, time, key_id, signature)"
+        " VALUES (1, 'forged', 'x', 'x', 'x')",
+        "INSERT OR REPLACE INTO key_revocations (key_id, recorded_at)"
+        " VALUES ('0123456789abcdef', '2000-01-01T00:00:00Z')",
+        "REPLACE INTO board_chain (seq, created_at, payload_sha256, prev_hash, entry_hash, v)"
+        " VALUES (1, 'x', 'x', 'x', 'forged', 1)",
+    ],
+)
+def test_replace_cannot_bypass_the_no_delete_triggers(make_client, tmp_path, sql):
+    key_file = tmp_path / "instance.key"
+    key_file.write_text(keys.new_private_key())
+    client = make_client(
+        board_checkpoint_seconds=0,
+        instance_signing_key_file=key_file,
+        revoked_key_ids=(("0123456789abcdef", None),),
+    )
+    _post(client, "x")
+    with pytest.raises(sqlite3.IntegrityError):
+        client.app.state.store._db.execute(sql)
