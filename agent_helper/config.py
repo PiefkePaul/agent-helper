@@ -161,6 +161,8 @@ class Settings:
     notify_events: frozenset[str] = DEFAULT_NOTIFY_EVENTS
     notify_include_preview: bool = False
     notify_max_per_minute: int = 30
+    board_checkpoint_seconds: int = 3600
+    instance_signing_key_file: Path | None = None
     help_board_window: int = 2000
     push_mode: str = "off"
     push_allowed_domains: str = ""
@@ -214,6 +216,10 @@ class Settings:
             notify_events=_events("NOTIFY_EVENTS", cls.notify_events),
             notify_include_preview=_bool("NOTIFY_INCLUDE_PREVIEW", cls.notify_include_preview),
             notify_max_per_minute=_int("NOTIFY_MAX_PER_MIN", cls.notify_max_per_minute),
+            board_checkpoint_seconds=_int("BOARD_CHECKPOINT_SECONDS", cls.board_checkpoint_seconds),
+            instance_signing_key_file=Path(os.environ["INSTANCE_SIGNING_KEY_FILE"])
+            if os.environ.get("INSTANCE_SIGNING_KEY_FILE")
+            else None,
             help_board_window=_int("HELP_BOARD_WINDOW", cls.help_board_window),
             push_mode=_push_mode(os.environ.get("PUSH_MODE")),
             push_allowed_domains=os.environ.get("PUSH_ALLOWED_DOMAINS", ""),

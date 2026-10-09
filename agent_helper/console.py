@@ -765,6 +765,13 @@ def build_console(
         return _redirect("/admin/console/board", f"Entry #{seq} purged; its hashes and the reason stay public.")
 
     def verify(request: Request, form: dict[str, str]) -> Response:
+        # Checkpoints first: one recorded while the entries are read is then never ahead of them.
+        checkpoints: list[dict[str, Any]] = []
+        while True:
+            cp_page = store.list_checkpoints(checkpoints[-1]["seq"] if checkpoints else 0, 500)
+            checkpoints += cp_page
+            if len(cp_page) < 500:
+                break
         entries: list[dict[str, Any]] = []
         after = 0
         while True:
@@ -774,12 +781,31 @@ def build_console(
                 break
             after = page[-1]["seq"]
         result = board.verify_chain(entries)
-        if result.ok and result.warnings:
+        if not result.ok:
+            return _redirect(
+                "/admin/console/board", f"Chain broken at #{result.failed_seq}: {result.error}", error=True
+            )
+        args = (entries, checkpoints, store.instance, store.public_key, store.other_keys)
+        problems = board.verify_checkpoints(*args)
+        notes = board.checkpoint_notes(*args)
+        if store.clock_behind:
+            notes.append("the clock is earlier than the last checkpoint")
+        if problems:
+            listed = "; ".join(problems[:5]) + (" …" if len(problems) > 5 else "")
+            return _redirect("/admin/console/board", f"Checkpoints contradict the chain: {listed}", error=True)
+        if result.warnings:
             listed = "; ".join(result.warnings[:5]) + (" …" if len(result.warnings) > 5 else "")
             msg = f"Chain verified: {result.checked} entries, but {len(result.warnings)} warning(s): {listed}"
             return _redirect("/admin/console/board", msg, error=True)
         if result.ok:
-            return _redirect("/admin/console/board", f"Chain verified: {result.checked} entries, head matches.")
+            hint = ""
+            if notes:
+                hint = " Note: " + "; ".join(notes[:5]) + (" …" if len(notes) > 5 else "")
+            return _redirect(
+                "/admin/console/board",
+                f"Chain verified: {result.checked} entries, head matches, {len(checkpoints)} checkpoint(s) hold."
+                + hint,
+            )
         return _redirect("/admin/console/board", f"Chain broken at #{result.failed_seq}: {result.error}", error=True)
 
     router.add_api_route("/admin/console/board", action(post_board), methods=["POST"])

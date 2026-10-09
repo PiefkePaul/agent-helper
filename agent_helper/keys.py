@@ -7,8 +7,10 @@ Signing is optional. What is signed is a canonical JSON statement, so any agent 
 - a message:     {"purpose": "agent-helper/message", "instance", "sender", "to", "kind", "subject", "message"}
 - a recovery:    {"purpose": "agent-helper/recover", "instance", "handle", "challenge"}
 
-`instance` is the service's public base URL (PUBLIC_BASE_URL), so a signature made for one agent-helper
-instance is useless on another.
+`instance` is the instance id (`ah-...`, stored in the database and published in
+/.well-known/agent-helper.json), so a signature made for one agent-helper instance is useless on another.
+The instance itself signs only checkpoints of its board head (docs/decisions/0022):
+{"purpose": "agent-helper/checkpoint", "instance", "seq", "entry_hash", "time"}.
 
 `canonical_json` is the board's: keys sorted, separators "," and ":", UTF-8, non-ASCII unescaped.
 Values are signed exactly as they appear in the stored note or message: a note's `author` as it was sent,
@@ -21,9 +23,11 @@ import base64
 import binascii
 import functools
 import hashlib
+from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from .board import canonical_json
 
@@ -160,3 +164,52 @@ def key_statement(instance: str, handle: str, public_key: str) -> bytes:
     return canonical_json(
         {"purpose": "agent-helper/key", "instance": instance, "handle": handle, "public_key": public_key}
     )
+
+
+def checkpoint_statement(instance: str, seq: int, entry_hash: str, time: str) -> bytes:
+    """What the instance signs about its own board head (docs/decisions/0022)."""
+    return canonical_json(
+        {"purpose": "agent-helper/checkpoint", "instance": instance, "seq": seq, "entry_hash": entry_hash, "time": time}
+    )
+
+
+def read_private_key_file(path: Path) -> str:
+    """An Ed25519 private key from a file: 64 hex characters (32 raw bytes), whitespace ignored."""
+    try:
+        text = path.read_text("ascii").strip()
+        raw = bytes.fromhex(text)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"INSTANCE_SIGNING_KEY_FILE cannot be read as a hex key: {type(exc).__name__}") from None
+    if len(raw) != 32:
+        raise SystemExit("INSTANCE_SIGNING_KEY_FILE must hold 64 hex characters (an Ed25519 private key)")
+    return raw.hex()
+
+
+def new_private_key() -> str:
+    """A new Ed25519 private key as 32 raw bytes in hex."""
+    return Ed25519PrivateKey.generate().private_bytes_raw().hex()
+
+
+def public_key_of(private_hex: str) -> str:
+    raw = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(private_hex)).public_key()
+    return base64.b64encode(raw.public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()
+
+
+def sign(private_hex: str, message: bytes) -> str:
+    return base64.b64encode(Ed25519PrivateKey.from_private_bytes(bytes.fromhex(private_hex)).sign(message)).decode()
+
+
+REVOKED_BY_KEY_FILE = "replaced by INSTANCE_SIGNING_KEY_FILE; the database key is in every backup"
+
+
+def add_previous_key(
+    registry: dict[str, dict[str, str]], private_hex: str, status: str, since: str, reason: str
+) -> str:
+    """Record an earlier signing key as "rotated" (its checkpoints still count) or "revoked" (they count
+    neither way). An existing entry is only ever moved from rotated to revoked, never back."""
+    public = public_key_of(private_hex)
+    kid = key_id(public)
+    old = registry.get(kid)
+    if old is None or (old["status"] == "rotated" and status == "revoked"):
+        registry[kid] = {"public_key": public, "status": status, "since": since, "reason": reason}
+    return kid

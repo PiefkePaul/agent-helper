@@ -70,3 +70,56 @@ def test_locked_database_gives_a_clear_message(stopped_db, capsys):
         holder.execute("ROLLBACK")
         holder.close()
     assert summary(db)["instance_id"] == instance
+
+
+def test_new_id_also_rotates_the_checkpoint_key(make_client, tmp_path, monkeypatch):
+    client = make_client()
+    instance, key = client.app.state.store.instance, client.app.state.store.public_key
+    client.__exit__(None, None, None)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    assert main(["new-instance-id", "--confirm", instance]) == 0
+    copy = make_client()
+    rotated = copy.app.state.store.public_key
+    assert rotated != key
+    copy.__exit__(None, None, None)
+    assert main(["restore-instance-id", "--confirm", copy.app.state.store.instance]) == 0
+    assert make_client().app.state.store.public_key == key
+
+
+def _keys_after(make_client):
+    client = make_client()
+    store = client.app.state.store
+    result = store.key_id, dict(store.other_keys)
+    client.__exit__(None, None, None)
+    return result
+
+
+def test_old_key_is_rotated_or_revoked_and_can_be_revoked_later(make_client, tmp_path, monkeypatch, capsys):
+    client = make_client()
+    instance, first_id = client.app.state.store.instance, client.app.state.store.key_id
+    client.__exit__(None, None, None)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    assert main(["new-instance-id", "--confirm", instance]) == 0
+    second_id, earlier = _keys_after(make_client)
+    assert earlier[first_id]["status"] == "rotated"
+
+    assert main(["revoke-key", "--key-id", second_id, "--confirm", second_id]) == 1  # the current key
+    assert main(["revoke-key", "--key-id", first_id]) == 1  # no confirmation
+    assert main(["revoke-key", "--key-id", "0" * 16, "--confirm", "0" * 16]) == 1  # unknown
+    assert main(["revoke-key", "--key-id", first_id, "--confirm", first_id]) == 0
+    assert _keys_after(make_client)[1][first_id]["status"] == "revoked"
+
+    # A revoked key cannot come back through restore-instance-id.
+    new_instance = summary(tmp_path / "agent-helper.db")["instance_id"]
+    assert main(["restore-instance-id", "--confirm", new_instance]) == 1
+    assert "revoked" in capsys.readouterr().err
+
+
+def test_new_id_can_revoke_the_old_key_at_once(make_client, tmp_path, monkeypatch):
+    client = make_client()
+    instance, first_id = client.app.state.store.instance, client.app.state.store.key_id
+    client.__exit__(None, None, None)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    assert main(["new-instance-id", "--revoke-old-key", "--confirm", instance]) == 0
+    assert _keys_after(make_client)[1][first_id]["status"] == "revoked"

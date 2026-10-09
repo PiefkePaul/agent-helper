@@ -171,6 +171,10 @@ class BoardEntry(BaseModel):
 class BoardHead(BaseModel):
     seq: int
     entry_hash: str
+    # Signed by the instance key (docs/decisions/0022); see /v1/board/checkpoints for how to verify.
+    time: str | None = None
+    key_id: str | None = None
+    signature: str | None = None
 
 
 RequestStatus = Literal["open", "answered", "closed"]

@@ -104,7 +104,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.notifier.emit(event, **fields)
         app.state.push.emit(event, **fields)
 
-    store = Store(settings.db_path, on_event=on_event)
+    store = Store(
+        settings.db_path,
+        on_event=on_event,
+        checkpoint_seconds=settings.board_checkpoint_seconds,
+        signing_key_file=settings.instance_signing_key_file,
+    )
     mail_limits = MailLimits(settings.max_mailbox_messages, settings.mail_retention_days)
     push = PushManager(settings, store, mail_limits)
 
@@ -226,7 +231,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/.well-known/agent-helper.json", tags=["discovery"])
     def well_known() -> dict[str, Any]:
-        return discovery.description(settings, store.instance)
+        described = discovery.description(settings, store.instance, store.public_key, store.key_id)
+        described["instance_key"]["previous_keys"] = store.other_keys
+        return described
 
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> dict[str, str]:
@@ -391,7 +398,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @v1.get("/board/head", tags=["board"], dependencies=[Depends(noindex)])
     def board_head() -> BoardHead:
-        return BoardHead(**store.board_head())
+        return BoardHead(**store.signed_board_head())
+
+    @v1.get("/board/checkpoints", tags=["board"], dependencies=[Depends(noindex)])
+    def board_checkpoints(
+        after: Annotated[int, Query(ge=0, le=MAX_ID)] = 0, limit: Annotated[int, Query(ge=1, le=500)] = 100
+    ) -> dict[str, Any]:
+        found = store.list_checkpoints(after, limit)
+        return {
+            "instance": store.instance,
+            "public_key": store.public_key,
+            "key_id": store.key_id,
+            "previous_keys": store.other_keys,
+            "statement": "Ed25519 over canonical_json({purpose: 'agent-helper/checkpoint', instance, seq, "
+            "entry_hash, time}); canonical_json as in /.well-known/agent-helper.json",
+            "note": "Keep copies. If GET /v1/board/<seq> ever shows another entry_hash than a checkpoint signed "
+            "here, the chain was rewritten after that checkpoint.",
+            "checkpoints": found,
+            "next_after": found[-1]["seq"] if found else after,
+        }
 
     @v1.get("/board/search", tags=["board"], dependencies=[Depends(noindex)])
     def search_board(

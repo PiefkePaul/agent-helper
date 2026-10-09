@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 import sqlite3
 import threading
@@ -17,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from . import board, handles, keys
+
+log = logging.getLogger("agent_helper.store")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
@@ -213,6 +216,19 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     suspended_reason TEXT
 );
 
+-- Signed checkpoints of the board head (docs/decisions/0022). Never changed or removed.
+CREATE TABLE IF NOT EXISTS board_checkpoints (
+    seq        INTEGER PRIMARY KEY,
+    entry_hash TEXT NOT NULL,
+    time       TEXT NOT NULL,
+    key_id     TEXT NOT NULL,
+    signature  TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS board_checkpoints_no_update BEFORE UPDATE ON board_checkpoints
+BEGIN SELECT RAISE(ABORT, 'checkpoints cannot be changed'); END;
+CREATE TRIGGER IF NOT EXISTS board_checkpoints_no_delete BEFORE DELETE ON board_checkpoints
+BEGIN SELECT RAISE(ABORT, 'checkpoints cannot be deleted'); END;
+
 CREATE TRIGGER IF NOT EXISTS board_payloads_no_update BEFORE UPDATE ON board_payloads
 BEGIN SELECT RAISE(ABORT, 'board payloads cannot be changed'); END;
 """
@@ -227,6 +243,7 @@ class SignatureRejected(Exception):
 
 
 CHALLENGE_SECONDS = 300
+CLOCK_JUMP_SECONDS = 86400
 
 
 class HandleUnavailable(Exception):
@@ -322,8 +339,16 @@ class Store:
     (used for operator notifications, docs/decisions/0012). It must not block or raise.
     """
 
-    def __init__(self, path: Path, on_event: EventHook = _no_events) -> None:
+    def __init__(
+        self,
+        path: Path,
+        on_event: EventHook = _no_events,
+        checkpoint_seconds: int = 3600,
+        signing_key_file: Path | None = None,
+    ) -> None:
         self._on_event = on_event
+        self._checkpoint_seconds = checkpoint_seconds
+        self.clock_behind = False  # set while the clock is earlier than the last checkpoint
         self._last_mail_purge = -1e9
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -340,10 +365,37 @@ class Store:
         # across restarts and workers.
         self.instance = self._meta("instance_id", lambda: "ah-" + secrets.token_hex(16))
         self._challenge_key = bytes.fromhex(self._meta("challenge_key", lambda: secrets.token_hex(32)))
+        # The instance's own signing key, for board checkpoints (docs/decisions/0022).
+        # Earlier keys with their status (docs/decisions/0022): "rotated" keys still vouch for their
+        # checkpoints, "revoked" ones vouch for nothing.
+        registry: dict[str, dict[str, str]] = json.loads(self._meta_value("previous_keys") or "{}")
+        if signing_key_file:
+            # With a key file no database key is created. One that exists from before lies in every backup,
+            # so it is revoked.
+            db_key = self._meta_value("signing_key")
+            self._signing_key = keys.read_private_key_file(signing_key_file)
+            if db_key and db_key != self._signing_key:
+                keys.add_previous_key(registry, db_key, "revoked", now(), keys.REVOKED_BY_KEY_FILE)
+        else:
+            self._signing_key = self._meta("signing_key", keys.new_private_key)
+        self.public_key = keys.public_key_of(self._signing_key)
+        self.key_id = keys.key_id(self.public_key)
+        registry.pop(self.key_id, None)  # the current key is never a previous one
+        self._db.execute(
+            "INSERT INTO instance_meta (name, value) VALUES ('previous_keys', ?)"
+            " ON CONFLICT (name) DO UPDATE SET value = excluded.value",
+            (json.dumps(registry, sort_keys=True),),
+        )
+        self.other_keys = registry
+
+    def _meta_value(self, name: str) -> str | None:
+        row = self._db.execute("SELECT value FROM instance_meta WHERE name = ?", (name,)).fetchone()
+        return row["value"] if row else None
 
     def _meta(self, name: str, make: Callable[[], str]) -> str:
         """A value stored once per database; created on first use."""
-        self._db.execute("INSERT OR IGNORE INTO instance_meta (name, value) VALUES (?, ?)", (name, make()))
+        if self._db.execute("SELECT 1 FROM instance_meta WHERE name = ?", (name,)).fetchone() is None:
+            self._db.execute("INSERT OR IGNORE INTO instance_meta (name, value) VALUES (?, ?)", (name, make()))
         (value,) = self._db.execute("SELECT value FROM instance_meta WHERE name = ?", (name,)).fetchone()
         return value
 
@@ -645,6 +697,7 @@ class Store:
                 ),
             )
             self._db.execute("INSERT INTO board_search (seq, text) VALUES (?, ?)", (seq, _search_text(topic, content)))
+            self._checkpoint_if_due()
             entry = self._board_entries(only_seq=seq)[0]
         if not as_operator:
             self._on_event("board.posted", seq=seq, handle=author, preview=content)
@@ -780,6 +833,69 @@ class Store:
         with self._lock:
             rows = self._board_entries(only_seq=seq)
             return rows[0] if rows else None
+
+    def _sign_head(self, seq: int, entry_hash: str, ts: str) -> dict[str, Any]:
+        signature = keys.sign(self._signing_key, keys.checkpoint_statement(self.instance, seq, entry_hash, ts))
+        return {"seq": seq, "entry_hash": entry_hash, "time": ts, "key_id": self.key_id, "signature": signature}
+
+    def _checkpoint_due(self) -> bool:
+        """Whether the head moved since the last checkpoint and that one is old enough. The caller holds
+        the lock."""
+        head = self._db.execute("SELECT seq FROM board_chain ORDER BY seq DESC LIMIT 1").fetchone()
+        if head is None:
+            return False
+        last = self._db.execute("SELECT seq, time FROM board_checkpoints ORDER BY seq DESC LIMIT 1").fetchone()
+        if last is None:
+            return True
+        age = time.time() - datetime.strptime(last["time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
+        # Checkpoint times normally only move forward: while the clock is a little earlier than the last
+        # checkpoint, none is recorded. A last checkpoint more than a day in the future was made by a clock
+        # that had jumped ahead; it must not block checkpoints until that date, so new ones are made with
+        # the current time (verifiers report the backward step as a warning). Both cases are warned about.
+        far_future = age < -CLOCK_JUMP_SECONDS
+        behind = age < 0 and not far_future
+        if (behind or far_future) and not self.clock_behind:
+            log.warning(
+                "the clock is earlier than the last board checkpoint; %s",
+                "treating that checkpoint's time as a clock error" if far_future else "waiting until it catches up",
+            )
+        self.clock_behind = behind or far_future
+        return last["seq"] < head["seq"] and not behind and (far_future or age >= self._checkpoint_seconds)
+
+    def _checkpoint_if_due(self) -> None:
+        """Record a signed checkpoint of the head if one is due. Must run inside `_tx`."""
+        if not self._checkpoint_due():
+            return
+        head = self._db.execute("SELECT seq, entry_hash FROM board_chain ORDER BY seq DESC LIMIT 1").fetchone()
+        cp = self._sign_head(head["seq"], head["entry_hash"], now())
+        self._db.execute(
+            "INSERT INTO board_checkpoints (seq, entry_hash, time, key_id, signature) VALUES (?, ?, ?, ?, ?)",
+            (cp["seq"], cp["entry_hash"], cp["time"], cp["key_id"], cp["signature"]),
+        )
+
+    def _checkpoint_on_read(self) -> None:
+        """Reads take the write lock only in the rare case that a checkpoint is due."""
+        with self._lock:
+            due = self._checkpoint_due()
+        if due:
+            with self._tx():
+                self._checkpoint_if_due()
+
+    def signed_board_head(self) -> dict[str, Any]:
+        """The current head, signed now by the instance key; also records a checkpoint when one is due."""
+        self._checkpoint_on_read()
+        with self._lock:
+            row = self._db.execute("SELECT seq, entry_hash FROM board_chain ORDER BY seq DESC LIMIT 1").fetchone()
+        seq, entry_hash = (row["seq"], row["entry_hash"]) if row else (0, board.GENESIS_HASH)
+        return self._sign_head(seq, entry_hash, now())
+
+    def list_checkpoints(self, after: int, limit: int) -> list[dict[str, Any]]:
+        self._checkpoint_on_read()
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM board_checkpoints WHERE seq > ? ORDER BY seq LIMIT ?", (after, limit)
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def board_head(self) -> dict[str, Any]:
         with self._lock:
