@@ -7,6 +7,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 MIN_ADMIN_SECRET_LENGTH = 32
 # Loopback only: the operator reaches /admin from inside the host or container. See docs/decisions/0016.
@@ -43,9 +44,22 @@ def _events(name: str, default: frozenset[str]) -> frozenset[str]:
 def _webhook_url(raw: str | None) -> str | None:
     if not raw:
         return None
-    if not raw.lower().startswith(("https://", "http://")):
-        log.warning("NOTIFY_WEBHOOK_URL must start with https:// or http://; notifications are disabled")
+    try:
+        parts = urlsplit(raw)
+        host = parts.hostname
+        parts.port  # noqa: B018 (raises ValueError for a bad port)
+    except ValueError:
+        parts, host = None, None
+    bad_chars = any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in raw)
+    if parts is None or parts.scheme.lower() not in ("https", "http") or not host or bad_chars:
+        # Never echo the URL: it may contain a secret.
+        log.warning(
+            "NOTIFY_WEBHOOK_URL must be an http(s) URL with a host, a valid port and no spaces; "
+            "notifications are disabled"
+        )
         return None
+    if parts.scheme.lower() == "http" and not _is_private_host(host):
+        log.warning("NOTIFY_WEBHOOK_URL uses plain http to a public host; events travel unencrypted")
     return raw
 
 
@@ -65,6 +79,18 @@ def parse_networks(raw: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Netw
             log.warning("invalid network %r in configuration; the whole list is ignored (deny)", part[:60])
             return ()
     return tuple(networks)
+
+
+def _is_private_host(host: str) -> bool:
+    host = host.rstrip(".").lower()
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        if host.isdigit():
+            return False  # an IPv4 address written as one number; treat as public
+        local_suffixes = (".localhost", ".local", ".lan", ".internal", ".home.arpa")
+        return host == "localhost" or host.endswith(local_suffixes) or "." not in host
+    return addr.is_private or addr.is_loopback or addr.is_link_local
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -132,6 +158,10 @@ class Settings:
             notify_include_preview=_bool("NOTIFY_INCLUDE_PREVIEW", cls.notify_include_preview),
             notify_max_per_minute=_int("NOTIFY_MAX_PER_MIN", cls.notify_max_per_minute),
         )
+        if settings.notify_webhook_url and not settings.notify_webhook_secret:
+            log.warning(
+                "NOTIFY_WEBHOOK_SECRET is not set; anyone who learns the webhook URL can send fake events to it"
+            )
         if settings.admin_secret is not None and not settings.admin_enabled:
             log.warning(
                 "ADMIN_AUTH_SECRET is shorter than %d characters; admin API is disabled",
