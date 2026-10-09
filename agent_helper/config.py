@@ -16,11 +16,14 @@ NOTIFY_EVENTS = (
     "request.created",
     "request.message",
     "report.created",
+    "request.closed",
     "board.posted",
     "directory.published",
     "capability.requested",
 )
-DEFAULT_NOTIFY_EVENTS = frozenset({"request.created", "request.message", "report.created", "capability.requested"})
+DEFAULT_NOTIFY_EVENTS = frozenset(
+    {"request.created", "request.message", "report.created", "request.closed", "capability.requested"}
+)
 
 log = logging.getLogger("agent_helper")
 
