@@ -29,6 +29,7 @@ from .models import (
     CapabilityRequestOut,
     Created,
     HideIn,
+    KeyIn,
     MailIn,
     MailOut,
     MessageIn,
@@ -36,6 +37,7 @@ from .models import (
     OperatorReplyIn,
     ProfileIn,
     ProfileOut,
+    RecoverIn,
     ReferralIn,
     ReportDecisionIn,
     ReportIn,
@@ -44,11 +46,20 @@ from .models import (
     RequestIn,
     RequestOut,
     RequestStatus,
+    RevokeIn,
     VoteIn,
     next_offset,
 )
 from .notify import Notifier
-from .store import ConversationFull, HandleUnavailable, MailLimits, MailRefused, Store
+from .store import (
+    CHALLENGE_SECONDS,
+    ConversationFull,
+    HandleUnavailable,
+    MailLimits,
+    MailRefused,
+    SignatureRejected,
+    Store,
+)
 
 NOT_FOUND = "not found or wrong token"
 HIDDEN_PROFILE_NOTE = (
@@ -79,7 +90,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     logging.getLogger("agent_helper").setLevel(settings.log_level.upper())
     notifier = Notifier.from_settings(settings)
     # The hook looks the notifier up on every event so tests can swap its transport.
-    store = Store(settings.db_path, on_event=lambda event, **fields: app.state.notifier.emit(event, **fields))
+    store = Store(
+        settings.db_path,
+        on_event=lambda event, **fields: app.state.notifier.emit(event, **fields),
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -118,6 +132,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def handle_unavailable(_: Request, exc: HandleUnavailable) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=409)
 
+    @app.exception_handler(SignatureRejected)
+    async def signature_rejected(_: Request, exc: SignatureRejected) -> JSONResponse:
+        return JSONResponse({"detail": str(exc)}, status_code=exc.status)
+
     @app.exception_handler(MailRefused)
     async def mail_refused(_: Request, exc: MailRefused) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=exc.status)
@@ -145,11 +163,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         headers = {**link_header, "Vary": "Accept"}
         if "text/html" in request.headers.get("accept", ""):
             return HTMLResponse(discovery.html_page(settings), headers=headers)
-        return PlainTextResponse(discovery.llms_txt(settings), headers=headers)
+        return PlainTextResponse(discovery.llms_txt(settings, store.instance), headers=headers)
 
     @app.get("/llms.txt", include_in_schema=False)
     def llms() -> PlainTextResponse:
-        return PlainTextResponse(discovery.llms_txt(settings), headers=link_header)
+        return PlainTextResponse(discovery.llms_txt(settings, store.instance), headers=link_header)
 
     @app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
     def robots() -> str:
@@ -177,7 +195,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/.well-known/agent-helper.json", tags=["discovery"])
     def well_known() -> dict[str, Any]:
-        return discovery.description(settings)
+        return discovery.description(settings, store.instance)
 
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> dict[str, str]:
@@ -353,6 +371,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body.handle_token,
             tags=body.tags,
             expires_in_days=body.expires_in_days,
+            key_id=body.key_id,
+            signature=body.signature,
         )
         out = BoardEntry(**entry).model_dump()
         if handle_token:
@@ -408,6 +428,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             body.message,
             body.in_reply_to,
             mail_limits,
+            key_id=body.key_id,
+            signature=body.signature,
         )
         out = MailOut(**mail).model_dump()
         if handle_token:
@@ -462,6 +484,60 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not store.set_block(handle, _bearer(authorization), other, blocked=False, limits=mail_limits):
             raise HTTPException(404, NOT_FOUND)
         return Response(status_code=204)
+
+    # --- agent keys (docs/decisions/0017) ---------------------------------------------------------
+
+    @v1.get("/handles/{handle}/keys", tags=["keys"])
+    def list_keys(handle: HandlePath) -> dict[str, Any]:
+        found = store.list_keys(handle)
+        if found is None:
+            raise HTTPException(404, "no such handle")
+        registered, listed = found
+        return {"handle": registered, "keys": listed}
+
+    @v1.post("/handles/{handle}/keys", tags=["keys"])
+    def add_key(handle: HandlePath, body: KeyIn) -> JSONResponse:
+        found, handle_token = store.add_key(handle, body.handle_token, body.public_key, body.proof)
+        out: dict[str, Any] = {"handle": handle, "keys": found}
+        if handle_token:
+            out |= {"handle_token": handle_token, "note": HANDLE_NOTE.strip()}
+        return JSONResponse(out, headers=no_store if handle_token else None)
+
+    @v1.post("/handles/{handle}/keys/{key_id}/revoke", tags=["keys"])
+    def revoke_key(handle: HandlePath, key_id: Annotated[str, Path(max_length=16)], body: RevokeIn) -> dict[str, Any]:
+        done = store.revoke_key(handle, body.handle_token, key_id)
+        if done is None:
+            raise HTTPException(404, NOT_FOUND)
+        if not done:
+            raise HTTPException(404, "no such key, or already revoked")
+        registered, listed = store.list_keys(handle) or (handle, [])
+        return {"handle": registered, "keys": listed}
+
+    @v1.post("/handles/{handle}/recovery-challenges", tags=["keys"])
+    def recovery_challenge(handle: HandlePath) -> JSONResponse:
+        registered, challenge = store.create_challenge(handle)
+        statement = {
+            "purpose": "agent-helper/recover",
+            "instance": store.instance,
+            "handle": registered,
+            "challenge": challenge,
+        }
+        return JSONResponse(
+            {
+                "challenge": challenge,
+                "expires_in": CHALLENGE_SECONDS,
+                "sign": "Ed25519 over the canonical JSON (keys sorted, no spaces, UTF-8) of 'statement', "
+                "exactly as given here.",
+                "statement": statement,
+            },
+            headers=no_store,
+        )
+
+    @v1.post("/handles/{handle}/recover", tags=["keys"])
+    def recover(handle: HandlePath, body: RecoverIn) -> JSONResponse:
+        token = store.recover_handle(handle, body.challenge, body.signature)
+        note = "A new handle_token, shown once. The old one no longer works."
+        return JSONResponse({"handle": handle, "handle_token": token, "note": note}, headers=no_store)
 
     app.include_router(v1)
 
