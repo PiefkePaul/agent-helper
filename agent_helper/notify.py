@@ -58,6 +58,16 @@ _opener = urllib.request.build_opener(_NoRedirect)
 
 
 def http_transport(url: str, body: bytes, headers: dict[str, str]) -> Delivery:
+    """POST with an overall deadline. The socket timeout only bounds each read, so a receiver that answers one
+    byte at a time could otherwise hold the worker for minutes. A request past the deadline is abandoned."""
+    result: list[Delivery] = []
+    worker = threading.Thread(target=lambda: result.append(_post(url, body, headers)), daemon=True)
+    worker.start()
+    worker.join(TIMEOUT_SECONDS + 1)
+    return result[0] if result else Delivery(ok=False, error="deadline exceeded", retry=True)
+
+
+def _post(url: str, body: bytes, headers: dict[str, str]) -> Delivery:
     """POST with the standard library. The URL is never logged: it may contain a secret (a bot token)."""
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")  # noqa: S310 (scheme checked)
     try:

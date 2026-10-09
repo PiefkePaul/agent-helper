@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 MIN_ADMIN_SECRET_LENGTH = 32
 NOTIFY_EVENTS = ("request.created", "request.message", "report.created", "board.posted")
@@ -33,10 +35,27 @@ def _events(name: str, default: frozenset[str]) -> frozenset[str]:
 def _webhook_url(raw: str | None) -> str | None:
     if not raw:
         return None
-    if not raw.lower().startswith(("https://", "http://")):
-        log.warning("NOTIFY_WEBHOOK_URL must start with https:// or http://; notifications are disabled")
+    try:
+        parts = urlsplit(raw)
+        host = parts.hostname
+    except ValueError:
+        parts, host = None, None
+    if parts is None or parts.scheme.lower() not in ("https", "http") or not host:
+        log.warning("NOTIFY_WEBHOOK_URL must be an http(s) URL with a host; notifications are disabled")
         return None
+    if parts.scheme.lower() == "http" and not _is_private_host(host):
+        log.warning("NOTIFY_WEBHOOK_URL uses plain http to a public host; events travel unencrypted")
     return raw
+
+
+def _is_private_host(host: str) -> bool:
+    if host == "localhost" or host.endswith((".local", ".lan", ".internal", ".home.arpa")) or "." not in host:
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return addr.is_private or addr.is_loopback
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -94,6 +113,10 @@ class Settings:
             notify_include_preview=_bool("NOTIFY_INCLUDE_PREVIEW", cls.notify_include_preview),
             notify_max_per_minute=_int("NOTIFY_MAX_PER_MIN", cls.notify_max_per_minute),
         )
+        if settings.notify_webhook_url and not settings.notify_webhook_secret:
+            log.warning(
+                "NOTIFY_WEBHOOK_SECRET is not set; anyone who learns the webhook URL can send fake events to it"
+            )
         if settings.admin_secret is not None and not settings.admin_enabled:
             log.warning(
                 "ADMIN_AUTH_SECRET is shorter than %d characters; admin API is disabled",
