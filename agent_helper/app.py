@@ -34,6 +34,7 @@ from .models import (
     RequestOut,
     RequestStatus,
 )
+from .notify import Notifier
 from .store import ConversationFull, HandleUnavailable, Store
 
 NOT_FOUND = "not found or wrong token"
@@ -55,12 +56,15 @@ AuthHeader = Annotated[str | None, Header(alias="Authorization")]
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     logging.basicConfig(level=settings.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    store = Store(settings.db_path)
+    notifier = Notifier.from_settings(settings)
+    # The hook looks the notifier up on every event so tests can swap its transport.
+    store = Store(settings.db_path, on_event=lambda event, **fields: app.state.notifier.emit(event, **fields))
     capabilities = discovery.load_capabilities(settings)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
+        app.state.notifier.close()
         store.close()
 
     app = FastAPI(
@@ -71,6 +75,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redoc_url=None,
         lifespan=lifespan,
     )
+    app.state.notifier = notifier
     write_limiter = TokenBucket(settings.write_per_minute)
     global_write_limiter = TokenBucket(settings.global_write_per_minute)
     app.add_middleware(
@@ -259,6 +264,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> list[RequestOut]:
         return [RequestOut(**r) for r in store.list_requests(status, limit)]
 
+    @admin.get("/requests/{req_id}")
+    def admin_get_request(req_id: str) -> RequestOut:
+        found = store.get_request_admin(req_id)
+        if found is None:
+            raise HTTPException(404, "no such request")
+        return RequestOut(**found)
+
     @admin.post("/requests/{req_id}/replies")
     def admin_reply(req_id: str, body: OperatorReplyIn) -> RequestOut:
         found = store.add_operator_reply(req_id, body.message, body.status)
@@ -290,6 +302,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if entry is None:
             raise HTTPException(404, "no such entry")
         return BoardEntry(**entry)
+
+    @admin.post("/notifications/test")
+    def admin_test_notification() -> dict[str, Any]:
+        result = app.state.notifier.send_test()
+        return {"delivered": result.ok, "status": result.status, "error": result.error}
 
     app.include_router(admin)
     return app
