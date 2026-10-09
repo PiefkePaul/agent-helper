@@ -54,8 +54,22 @@ MAX_QUEUE = 5_000
 WORKERS = 8  # one slow name server or endpoint must not hold up everyone else
 MAX_REQUEST_BYTES = 128 * 1024
 MAX_OPT_OUTS = 100_000
-EVENT_ID = re.compile(r"^evt_[0-9a-f]{24}$")
-SIGNATURE = re.compile(r"^sha256=[0-9a-f]{64}$")
+# Checked with fullmatch: no trailing newline, no Unicode digits or letters (explicit ASCII classes).
+EVENT_ID = re.compile(r"evt_[0-9a-f]{24}")
+SIGNATURE = re.compile(r"sha256=[0-9a-f]{64}")
+TIMESTAMP = re.compile(r"[0-9]{1,12}")
+NONCE = re.compile(r"[0-9A-Za-z_-]{16,64}")
+JOB_ID = re.compile(r"[0-9A-Za-z_-]{1,64}")
+UTC_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+SHORT_TEXT = re.compile(r"[\x20-\x7e]{1,600}")  # printable ASCII only
+PUSH_EVENT_TYPES = ("request.reply", "mail.received", "referral.received")
+# Exactly these fields per notice type: the relay sends nothing but what the design allows.
+BODY_FIELDS = {
+    "push.verify": {"type", "event_id", "time", "handle", "instance", "code", "about", "confirm"},
+    "notice": {"type", "event_id", "time", "handle", "instance", "count", "events"},
+    "subscription.expiring": {"type", "event_id", "time", "handle", "instance", "expires_at"},
+}
+BODY_KIND = {"push.verify": "verify", "notice": "notice", "subscription.expiring": "notice"}
 OUTCOMES = ("delivered", "failed", "tls_failure", "opted_out", "refused", "capped")
 
 
@@ -64,6 +78,84 @@ def sign(secret: str, timestamp: str, nonce: str, method: str, path: str, body: 
     a repeated signature is always a replay."""
     message = f"{timestamp}.{nonce}.{method.upper()}.{path}.".encode() + body
     return "sha256=" + hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
+
+
+def _matches(pattern: re.Pattern[str], value: Any) -> bool:
+    return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+def _short(value: Any) -> bool:
+    return _matches(SHORT_TEXT, value)
+
+
+MAX_COUNT = 10_000
+
+
+def canonical_json(value: Any) -> str:
+    """The one serialisation the service uses for notice bodies, and the only one the relay accepts."""
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=True)
+
+
+def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate key")
+    return dict(pairs)
+
+
+def valid_job(job: Any) -> bool:
+    return (
+        isinstance(job, dict)
+        and _matches(JOB_ID, job.get("job_id"))
+        and job.get("kind") in ("verify", "notice")
+        and isinstance(job.get("url"), str)
+        and _matches(EVENT_ID, job.get("event_id"))
+        and _matches(TIMESTAMP, job.get("timestamp"))
+        and _matches(SIGNATURE, job.get("signature"))
+        and valid_body(job)
+    )
+
+
+def valid_body(job: dict[str, Any]) -> bool:
+    """The notice body is JSON with a fixed set of fields for its type, matching the job. Anything else is
+    refused, so the relay cannot be used to send arbitrary content."""
+    raw = job.get("body")
+    if not isinstance(raw, str) or len(raw) > 1024 or not raw.isascii():
+        return False
+    try:
+        body = json.loads(raw, object_pairs_hook=_no_duplicates)
+    except ValueError:
+        return False
+    # Only the exact form the service writes: no padding, no duplicate keys, no alternative escapes.
+    if not isinstance(body, dict) or canonical_json(body) != raw:
+        return False
+    kind = body.get("type")
+    if kind not in BODY_FIELDS or set(body) != BODY_FIELDS[kind] or BODY_KIND[kind] != job.get("kind"):
+        return False
+    if body["event_id"] != job.get("event_id") or not _matches(UTC_TIME, body["time"]):
+        return False
+    if not (_short(body["handle"]) and len(body["handle"]) <= 64 and _short(body["instance"])):
+        return False
+    if kind == "push.verify":
+        return all(_short(body[k]) for k in ("code", "about", "confirm"))
+    if kind == "subscription.expiring":
+        return _matches(UTC_TIME, body["expires_at"])
+    events = body["events"]
+    count = body["count"]
+    return (
+        isinstance(count, int)
+        and not isinstance(count, bool)
+        and 1 <= count <= MAX_COUNT
+        and isinstance(events, list)
+        and len(events) <= 10
+        and all(
+            isinstance(e, dict)
+            and set(e) == {"event", "id"}
+            and e["event"] in PUSH_EVENT_TYPES
+            and (_matches(JOB_ID, e["id"]) or (isinstance(e["id"], int) and not isinstance(e["id"], bool)))
+            for e in events
+        )
+    )
 
 
 def notice_headers(job: dict[str, Any]) -> dict[str, str]:
@@ -185,6 +277,9 @@ class Sender:
         if self.autostart:
             self._start()
         return accepted
+
+    def refuse(self, job_id: str) -> None:
+        self._record({"job_id": job_id, "kind": "invalid"}, "refused")
 
     def outcomes(self, after: int, limit: int = 500) -> tuple[list[dict[str, Any]], int]:
         with self._lock:
@@ -353,7 +448,7 @@ def create_relay_app(settings: RelaySettings, sender: Sender | None = None) -> F
         timestamp = request.headers.get("x-relay-timestamp", "")
         given = request.headers.get("x-relay-signature", "")
         nonce = request.headers.get("x-relay-nonce", "")
-        if not 16 <= len(nonce) <= 64 or not timestamp.isdigit() or len(given) != 71:
+        if not NONCE.fullmatch(nonce) or not TIMESTAMP.fullmatch(timestamp) or not SIGNATURE.fullmatch(given):
             raise HTTPException(401, "unauthorized")
         age = abs(time.time() - int(timestamp))
         if age > SIGNATURE_WINDOW_SECONDS:
@@ -386,26 +481,20 @@ def create_relay_app(settings: RelaySettings, sender: Sender | None = None) -> F
         items = data.get("jobs") if isinstance(data, dict) else None
         if not isinstance(items, list) or len(items) > MAX_JOBS_PER_CALL:
             raise HTTPException(400, f"send 'jobs', a list of at most {MAX_JOBS_PER_CALL}")
-        valid = []
+        # One bad job must not hold up the others: it is reported as refused (when it has a usable id)
+        # and the rest go ahead.
+        # A job id that appears more than once in a call is ambiguous: every copy is refused.
+        ids = [job.get("job_id") for job in items if isinstance(job, dict) and isinstance(job.get("job_id"), str)]
+        repeated = {i for i in ids if ids.count(i) > 1}
+        valid, refused = [], 0
         for job in items:
-            if not (
-                isinstance(job, dict)
-                and isinstance(job.get("job_id"), str)
-                and job.get("kind") in ("verify", "notice")
-                and isinstance(job.get("url"), str)
-                and isinstance(job.get("body"), str)
-                and len(job["body"]) <= 1024
-                and isinstance(job.get("event_id"), str)
-                and EVENT_ID.match(job["event_id"])
-                and isinstance(job.get("timestamp"), str)
-                and job["timestamp"].isdigit()
-                and len(job["timestamp"]) <= 12
-                and isinstance(job.get("signature"), str)
-                and SIGNATURE.match(job["signature"])
-            ):
-                raise HTTPException(400, "invalid job")
-            valid.append(job)
-        return JSONResponse({"accepted": sender.submit(valid)})
+            if valid_job(job) and job["job_id"] not in repeated:
+                valid.append(job)
+                continue
+            refused += 1
+            if isinstance(job, dict) and _matches(JOB_ID, job.get("job_id")):
+                sender.refuse(job["job_id"])
+        return JSONResponse({"accepted": sender.submit(valid), "refused": refused})
 
     @app.get("/v1/relay/outcomes")
     async def outcomes(request: Request, after: int = 0) -> JSONResponse:
