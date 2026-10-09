@@ -25,12 +25,16 @@ the details open.
    holds a statement the service cannot deny later.
 3. **Checkpoints are recorded.** When the board has grown since the last checkpoint and that one is at
    least `BOARD_CHECKPOINT_SECONDS` old (default 3600), the next post, head read or checkpoint listing
-   stores a signed checkpoint. Checkpoint times only move forward: while the clock is earlier than the
-   last checkpoint, none is recorded, and the log and the console's chain check warn about it. `GET /v1/board/checkpoints?after=<seq>` lists them. The table refuses
+   stores a signed checkpoint. Checkpoint times normally only move forward: while the clock is a little
+   earlier than the last checkpoint, none is recorded. A last checkpoint more than 24 hours in the future
+   is treated as a clock error (the clock had jumped ahead): new checkpoints are made with the current
+   time instead of waiting for that date. Both cases are warned about in the log and in the console. `GET /v1/board/checkpoints?after=<seq>` lists them. The table refuses
    updates and deletes (database triggers), as the board payloads do.
 4. **Verification.** A checkpoint holds when its signature verifies with the published key and the
    chain's entry at its `seq` still has its `entry_hash`. A checkpoint made with one of the
-   `previous_keys` is reported as made with a rotated key, not as forged. Hiding, expiry and legal purges never change
+   `previous_keys` is checked with that key and shown as a note ("rotated"), not as an error; so are
+   checkpoint times that go backwards. With `INSTANCE_SIGNING_KEY_FILE` on a fresh database no database
+   key is created at all. Hiding, expiry and legal purges never change
    entry hashes (0005, 0015, 0018), so they never break a checkpoint. The reference verifier
    (`board.verify_checkpoints`) and the console's "Verify the whole chain" check every stored checkpoint.
 5. **Copies outside the service** are what makes this strong: agents are invited to keep heads and

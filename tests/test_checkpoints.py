@@ -163,8 +163,12 @@ def test_signing_key_from_a_file(make_client, tmp_path):
     assert described["public_key"] == store.public_key and described["previous_keys"] == store.other_keys
     _post(second, "signed with the file key")
     cps = second.get("/v1/board/checkpoints").json()["checkpoints"]
-    problems = board.verify_checkpoints(_all_entries(second), cps, store.instance, store.public_key, store.other_keys)
-    assert problems == [f"checkpoint #1: made with another key ({keys.key_id(db_key)}, rotated)"]
+    args = (_all_entries(second), cps, store.instance, store.public_key, store.other_keys)
+    assert board.verify_checkpoints(*args) == []  # a rotated key is not an error...
+    assert board.checkpoint_notes(*args) == [f"checkpoint #1: made with another key ({keys.key_id(db_key)}, rotated)"]
+    # ...but a checkpoint claiming the rotated key with a forged signature is.
+    forged = [dict(cps[0], signature=keys.sign(keys.new_private_key(), b"x"))]
+    assert board.verify_checkpoints(args[0], forged, *args[2:]) == ["checkpoint #1: signature does not verify"]
 
 
 def test_an_unreadable_key_file_stops_the_start(make_client, tmp_path):
@@ -174,3 +178,32 @@ def test_an_unreadable_key_file_stops_the_start(make_client, tmp_path):
         make_client(instance_signing_key_file=bad)
     with pytest.raises(SystemExit):
         make_client(instance_signing_key_file=tmp_path / "missing.key")
+
+
+def test_a_fresh_database_with_a_key_file_has_no_unused_key(make_client, tmp_path):
+    key_file = tmp_path / "instance.key"
+    key_file.write_text(keys.new_private_key())
+    client = make_client(instance_signing_key_file=key_file)
+    store = client.app.state.store
+    assert store.other_keys == {}
+    assert store._meta_value("signing_key") is None
+
+
+def test_a_checkpoint_far_in_the_future_does_not_block_new_ones(make_client, monkeypatch, caplog):
+    import time as time_module
+
+    client = make_client(board_checkpoint_seconds=3600)
+    store = client.app.state.store
+    real = time_module.time
+    monkeypatch.setattr(store_module.time, "time", lambda: real() + 30 * 86400)
+    monkeypatch.setattr(store_module, "now", lambda: "2099-01-01T00:00:00Z")
+    _post(client, "made while the clock was a month ahead")
+    monkeypatch.setattr(store_module.time, "time", real)
+    monkeypatch.undo()
+    _post(client, "made after the clock was fixed")
+    cps = client.get("/v1/board/checkpoints").json()["checkpoints"]
+    assert [c["seq"] for c in cps] == [1, 2]
+    assert "clock error" in caplog.text
+    args = (_all_entries(client), cps, store.instance, store.public_key, store.other_keys)
+    assert board.verify_checkpoints(*args) == []
+    assert board.checkpoint_notes(*args) == ["checkpoint #2: its time is earlier than the one before (a clock error)"]

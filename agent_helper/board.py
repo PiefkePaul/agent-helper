@@ -134,25 +134,53 @@ def verify_checkpoints(
     public_key: str,
     other_keys: Mapping[str, str] | None = None,
 ) -> list[str]:
-    """Problems with signed checkpoints (docs/decisions/0022): a bad signature, or a checkpoint whose
+    """Errors in signed checkpoints (docs/decisions/0022): a bad signature, or a checkpoint whose
     entry_hash differs from the chain's entry at that seq (the chain was rewritten after it was signed).
     `entries` as returned by GET /v1/board; an empty list means every checkpoint holds. `other_keys`
     (key id -> public key) are earlier keys of this instance: a checkpoint signed with one of them is
-    reported as made with a rotated key, not as forged."""
+    checked with that key; `checkpoint_notes` reports it."""
+    return _check_checkpoints(entries, checkpoints, instance, public_key, other_keys)[0]
+
+
+def checkpoint_notes(
+    entries: Iterable[Mapping[str, Any]],
+    checkpoints: Iterable[Mapping[str, Any]],
+    instance: str,
+    public_key: str,
+    other_keys: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Things worth a look that are not errors: checkpoints made with a rotated key, and checkpoint times
+    that go backwards (a clock that had jumped ahead)."""
+    return _check_checkpoints(entries, checkpoints, instance, public_key, other_keys)[1]
+
+
+def _check_checkpoints(
+    entries: Iterable[Mapping[str, Any]],
+    checkpoints: Iterable[Mapping[str, Any]],
+    instance: str,
+    public_key: str,
+    other_keys: Mapping[str, str] | None,
+) -> tuple[list[str], list[str]]:
     from . import keys  # keys imports this module
 
     hashes = {e["seq"]: e["entry_hash"] for e in entries}
     current_id = keys.key_id(public_key)
-    problems = []
-    for cp in checkpoints:
+    errors: list[str] = []
+    notes: list[str] = []
+    last_time = None
+    for cp in sorted(checkpoints, key=lambda c: c["seq"]):
         statement = keys.checkpoint_statement(instance, cp["seq"], cp["entry_hash"], cp["time"])
-        old_key = (other_keys or {}).get(cp.get("key_id", current_id)) if cp.get("key_id") != current_id else None
-        if old_key is not None and keys.verify(old_key, cp["signature"], statement):
-            problems.append(f"checkpoint #{cp['seq']}: made with another key ({cp['key_id']}, rotated)")
-        elif not keys.verify(public_key, cp["signature"], statement):
-            problems.append(f"checkpoint #{cp['seq']}: signature does not verify")
+        key = public_key
+        if cp.get("key_id") != current_id and cp.get("key_id") in (other_keys or {}):
+            key = (other_keys or {})[cp["key_id"]]
+            notes.append(f"checkpoint #{cp['seq']}: made with another key ({cp['key_id']}, rotated)")
+        if not keys.verify(key, cp["signature"], statement):
+            errors.append(f"checkpoint #{cp['seq']}: signature does not verify")
         elif cp["seq"] not in hashes:
-            problems.append(f"checkpoint #{cp['seq']}: the chain has no such entry")
+            errors.append(f"checkpoint #{cp['seq']}: the chain has no such entry")
         elif hashes[cp["seq"]] != cp["entry_hash"]:
-            problems.append(f"checkpoint #{cp['seq']}: the chain differs from what was signed")
-    return problems
+            errors.append(f"checkpoint #{cp['seq']}: the chain differs from what was signed")
+        if last_time is not None and cp["time"] < last_time:
+            notes.append(f"checkpoint #{cp['seq']}: its time is earlier than the one before (a clock error)")
+        last_time = cp["time"] if last_time is None else max(last_time, cp["time"])
+    return errors, notes

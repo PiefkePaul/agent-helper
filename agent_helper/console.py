@@ -785,9 +785,11 @@ def build_console(
             return _redirect(
                 "/admin/console/board", f"Chain broken at #{result.failed_seq}: {result.error}", error=True
             )
-        problems = board.verify_checkpoints(entries, checkpoints, store.instance, store.public_key, store.other_keys)
+        args = (entries, checkpoints, store.instance, store.public_key, store.other_keys)
+        problems = board.verify_checkpoints(*args)
+        notes = board.checkpoint_notes(*args)
         if store.clock_behind:
-            problems.append("the clock is earlier than the last checkpoint; no new checkpoints until it catches up")
+            notes.append("the clock is earlier than the last checkpoint")
         if problems:
             listed = "; ".join(problems[:5]) + (" …" if len(problems) > 5 else "")
             return _redirect("/admin/console/board", f"Checkpoints contradict the chain: {listed}", error=True)
@@ -796,9 +798,13 @@ def build_console(
             msg = f"Chain verified: {result.checked} entries, but {len(result.warnings)} warning(s): {listed}"
             return _redirect("/admin/console/board", msg, error=True)
         if result.ok:
+            hint = ""
+            if notes:
+                hint = " Note: " + "; ".join(notes[:5]) + (" …" if len(notes) > 5 else "")
             return _redirect(
                 "/admin/console/board",
-                f"Chain verified: {result.checked} entries, head matches, {len(checkpoints)} checkpoint(s) hold.",
+                f"Chain verified: {result.checked} entries, head matches, {len(checkpoints)} checkpoint(s) hold."
+                + hint,
             )
         return _redirect("/admin/console/board", f"Chain broken at #{result.failed_seq}: {result.error}", error=True)
 
