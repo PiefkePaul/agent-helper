@@ -90,7 +90,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     logging.getLogger("agent_helper").setLevel(settings.log_level.upper())
     notifier = Notifier.from_settings(settings)
     # The hook looks the notifier up on every event so tests can swap its transport.
-    store = Store(settings.db_path, on_event=lambda event, **fields: app.state.notifier.emit(event, **fields))
+    store = Store(
+        settings.db_path,
+        on_event=lambda event, **fields: app.state.notifier.emit(event, **fields),
+        instance=settings.public_base_url,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -494,7 +498,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @v1.post("/handles/{handle}/keys", tags=["keys"])
     def add_key(handle: HandlePath, body: KeyIn) -> JSONResponse:
-        found, handle_token = store.add_key(handle, body.handle_token, body.public_key)
+        found, handle_token = store.add_key(handle, body.handle_token, body.public_key, body.proof)
         out: dict[str, Any] = {"handle": handle, "keys": found}
         if handle_token:
             out |= {"handle_token": handle_token, "note": HANDLE_NOTE.strip()}
@@ -513,7 +517,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @v1.post("/handles/{handle}/recovery-challenges", tags=["keys"])
     def recovery_challenge(handle: HandlePath) -> JSONResponse:
         registered, challenge = store.create_challenge(handle)
-        statement = {"purpose": "agent-helper/recover", "handle": registered, "challenge": challenge}
+        statement = {
+            "purpose": "agent-helper/recover",
+            "instance": settings.public_base_url,
+            "handle": registered,
+            "challenge": challenge,
+        }
         return JSONResponse(
             {
                 "challenge": challenge,

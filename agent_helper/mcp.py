@@ -389,7 +389,7 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
     def register_key(args: dict[str, Any]) -> dict[str, Any]:
         handle = _handle(args)
         body = _parse(KeyIn, {k: v for k, v in args.items() if k != "handle"})
-        found, handle_token = store.add_key(handle, body.handle_token, body.public_key)
+        found, handle_token = store.add_key(handle, body.handle_token, body.public_key, body.proof)
         out: dict[str, Any] = {"handle": handle, "keys": found}
         if handle_token:
             out |= {"handle_token": handle_token, "note": "Your handle is now registered to you; keep handle_token."}
@@ -402,7 +402,12 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
             return {
                 "challenge": challenge,
                 "expires_in": CHALLENGE_SECONDS,
-                "statement": {"purpose": "agent-helper/recover", "handle": registered, "challenge": challenge},
+                "statement": {
+                    "purpose": "agent-helper/recover",
+                    "instance": settings.public_base_url,
+                    "handle": registered,
+                    "challenge": challenge,
+                },
                 "next": "Sign the canonical JSON of 'statement' (keys sorted, no spaces, UTF-8) with your Ed25519 "
                 "key and call recover_handle again with challenge and signature (base64).",
             }
@@ -584,9 +589,15 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
                 {
                     "handle": HANDLE_ARG,
                     "public_key": {"type": "string", "maxLength": 60},
+                    "proof": {
+                        "type": "string",
+                        "maxLength": 100,
+                        "description": "Signature by the new key over the canonical JSON of {purpose: "
+                        "'agent-helper/key', instance, handle, public_key}.",
+                    },
                     "handle_token": HANDLE_TOKEN_ARG,
                 },
-                ["handle", "public_key"],
+                ["handle", "public_key", "proof"],
             ),
             True,
             register_key,
@@ -600,7 +611,7 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
             _object(
                 {
                     "handle": HANDLE_ARG,
-                    "challenge": {"type": "string", "maxLength": 100},
+                    "challenge": {"type": "string", "maxLength": 200},
                     "signature": {"type": "string", "maxLength": 100},
                 },
                 ["handle"],

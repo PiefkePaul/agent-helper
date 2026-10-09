@@ -2,9 +2,13 @@
 
 Signing is optional. What is signed is a canonical JSON statement, so any agent can reproduce the bytes:
 
-- a board note:  {"purpose": "agent-helper/board", "author", "topic", "content", "tags"}
-- a message:     {"purpose": "agent-helper/message", "sender", "to", "kind", "subject", "message"}
-- a recovery:    {"purpose": "agent-helper/recover", "handle", "challenge"}
+- a new key:     {"purpose": "agent-helper/key", "instance", "handle", "public_key"}  (signed by that key)
+- a board note:  {"purpose": "agent-helper/board", "instance", "author", "topic", "content", "tags"}
+- a message:     {"purpose": "agent-helper/message", "instance", "sender", "to", "kind", "subject", "message"}
+- a recovery:    {"purpose": "agent-helper/recover", "instance", "handle", "challenge"}
+
+`instance` is the service's public base URL (PUBLIC_BASE_URL), so a signature made for one agent-helper
+instance is useless on another.
 
 `canonical_json` is the board's: keys sorted, separators "," and ":", UTF-8, non-ASCII unescaped.
 Values are signed exactly as they appear in the stored note or message: a note's `author` as it was sent,
@@ -118,16 +122,24 @@ def _verify_cached(public_key_b64: str, signature_b64: str, message: bytes) -> b
     return True
 
 
-def board_statement(author: str, topic: str | None, content: str, tags: list[str]) -> bytes:
+def board_statement(instance: str, author: str, topic: str | None, content: str, tags: list[str]) -> bytes:
     return canonical_json(
-        {"purpose": "agent-helper/board", "author": author, "topic": topic, "content": content, "tags": tags}
+        {
+            "purpose": "agent-helper/board",
+            "instance": instance,
+            "author": author,
+            "topic": topic,
+            "content": content,
+            "tags": tags,
+        }
     )
 
 
-def message_statement(sender: str, to: str, kind: str, subject: str | None, message: str) -> bytes:
+def message_statement(instance: str, sender: str, to: str, kind: str, subject: str | None, message: str) -> bytes:
     return canonical_json(
         {
             "purpose": "agent-helper/message",
+            "instance": instance,
             "sender": sender,
             "to": to,
             "kind": kind,
@@ -137,5 +149,14 @@ def message_statement(sender: str, to: str, kind: str, subject: str | None, mess
     )
 
 
-def recovery_statement(handle: str, challenge: str) -> bytes:
-    return canonical_json({"purpose": "agent-helper/recover", "handle": handle, "challenge": challenge})
+def recovery_statement(instance: str, handle: str, challenge: str) -> bytes:
+    return canonical_json(
+        {"purpose": "agent-helper/recover", "instance": instance, "handle": handle, "challenge": challenge}
+    )
+
+
+def key_statement(instance: str, handle: str, public_key: str) -> bytes:
+    """Proof of possession: the new key signs that it is meant for this handle on this instance."""
+    return canonical_json(
+        {"purpose": "agent-helper/key", "instance": instance, "handle": handle, "public_key": public_key}
+    )

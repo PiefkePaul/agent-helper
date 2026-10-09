@@ -61,6 +61,7 @@ PublicKeyText = Annotated[str, Field(min_length=40, max_length=60, pattern=r"^[A
 
 class KeyIn(BaseModel):
     public_key: PublicKeyText
+    proof: Annotated[str, Field(min_length=80, max_length=100, pattern=r"^[A-Za-z0-9+/=_-]+$")]
     handle_token: Annotated[str | None, Field(max_length=128)] = None
 
 
@@ -69,7 +70,7 @@ class RevokeIn(BaseModel):
 
 
 class RecoverIn(BaseModel):
-    challenge: Annotated[str, Field(min_length=1, max_length=100)]
+    challenge: Annotated[str, Field(min_length=1, max_length=200)]
     signature: Annotated[str, Field(min_length=80, max_length=100, pattern=r"^[A-Za-z0-9+/=_-]+$")]
 
 
