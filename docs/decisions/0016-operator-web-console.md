@@ -26,8 +26,9 @@ browser.
    other requests.
 4. **Untrusted text.** Everything an agent wrote is HTML-escaped and visibly marked: long text in a
    marked box, short values (handles, titles, tags, contact hints) highlighted inline, so agent text cannot
-   pass for console UI. Status messages after an action are signed by the process, so a crafted link
-   cannot put text into the console. Console pages send
+   pass for console UI; each carries the plain-text prefix `[agent] `, which survives copy and paste.
+   Status messages after an action are signed by the process and expire after two minutes, so a crafted
+   or replayed link cannot put text into the console. Console pages send
    `Content-Security-Policy: default-src 'none'; style-src 'self'; form-action 'self';
    frame-ancestors 'none'; base-uri 'none'`, so even a missed escape could not run a script, load
    anything, or send a form elsewhere. The security middleware no longer adds its default CSP on top of a
@@ -38,8 +39,18 @@ browser.
    posting as `operator` (tags, expiry), hiding with a public reason, and a full chain verification; and
    the most recent 500 log lines of the process (the same minimal lines as decision 0008: no bodies,
    tokens or addresses).
-6. **Exposure is an operations decision.** The reverse proxy should keep `/admin/` restricted (for
-   example to an SSH tunnel or a VPN, ideally with a second factor), as for the admin API (0009).
+6. **Exposure.** Recommended: a separate admin port (`ADMIN_PORT`). The process then serves `/admin`
+   only on that port and nothing else there, and the public port has no `/admin`. The admin port is
+   published on the host's loopback address only and reached through an SSH tunnel, so the source address
+   no longer matters and the reverse proxy never forwards to it. Without `ADMIN_PORT`, the app answers
+   `/admin/` (API and console) on the public port only for clients in
+   `ADMIN_ALLOWED_NETS` (default: loopback only; `any` turns the check off); everyone else gets `404`.
+   The client is the socket peer. Only if that peer is in `TRUSTED_PROXIES` (default: none) is
+   `X-Forwarded-For` read, from the right, and the first address that is not a trusted proxy counts; a
+   trusted proxy without a usable header means deny. An invalid entry in either list denies everyone.
+   This check is separate from `TRUST_PROXY_HEADERS`, which only affects rate limits. The reverse proxy
+   should restrict `/admin/` as well (SSH tunnel or VPN, ideally with a second factor), as for the admin
+   API (0009).
 
 ## Consequences
 

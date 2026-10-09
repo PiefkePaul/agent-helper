@@ -10,6 +10,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 MIN_ADMIN_SECRET_LENGTH = 32
+# Loopback only: the operator reaches /admin from inside the host or container. See docs/decisions/0016.
+DEFAULT_ADMIN_NETS = "127.0.0.0/8,::1/128"
 NOTIFY_EVENTS = (
     "request.created",
     "request.message",
@@ -61,6 +63,24 @@ def _webhook_url(raw: str | None) -> str | None:
     return raw
 
 
+def parse_networks(raw: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] | None:
+    """Comma-separated CIDRs; "any" means every client (None). One invalid entry makes the whole list empty,
+    which denies everyone: a typo must not open access."""
+    if raw.strip().lower() == "any":
+        return None
+    networks = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            log.warning("invalid network %r in configuration; the whole list is ignored (deny)", part[:60])
+            return ()
+    return tuple(networks)
+
+
 def _is_private_host(host: str) -> bool:
     host = host.rstrip(".").lower()
     try:
@@ -93,6 +113,9 @@ class Settings:
     max_messages_per_request: int = 200
     capabilities_file: Path | None = None
     log_level: str = "info"
+    admin_allowed_nets: str = DEFAULT_ADMIN_NETS
+    trusted_proxies: str = ""
+    admin_port: int | None = None
     max_mailbox_messages: int = 500
     mail_retention_days: int = 90
     notify_webhook_url: str | None = None
@@ -124,6 +147,9 @@ class Settings:
             max_messages_per_request=_int("MAX_MESSAGES_PER_REQUEST", cls.max_messages_per_request),
             capabilities_file=Path(caps) if caps else None,
             log_level=os.environ.get("LOG_LEVEL", cls.log_level),
+            admin_allowed_nets=os.environ.get("ADMIN_ALLOWED_NETS") or cls.admin_allowed_nets,
+            trusted_proxies=os.environ.get("TRUSTED_PROXIES", cls.trusted_proxies),
+            admin_port=_int("ADMIN_PORT", 0) or None,
             max_mailbox_messages=_int("MAX_MAILBOX_MESSAGES", cls.max_mailbox_messages),
             mail_retention_days=_int("MAIL_RETENTION_DAYS", cls.mail_retention_days),
             notify_webhook_url=_webhook_url(os.environ.get("NOTIFY_WEBHOOK_URL")),

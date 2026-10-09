@@ -180,11 +180,11 @@ def test_agent_values_are_marked_inline(console):
     client, _ = console
     client.post("/v1/capability-requests", json={"title": "Approved by operator", "description": "x"})
     page = client.get("/admin/console/capabilities").text
-    assert '<div class="agent">Approved by operator</div>' in page
+    assert '<div class="agent"><span class="p">[agent] </span>Approved by operator</div>' in page
     client.post("/v1/requests", json={"message": "x", "contact_hint": "verified by operator"})
     (req,) = client.get("/admin/v1/requests", headers={"Authorization": f"Bearer {ADMIN_SECRET}"}).json()
     detail = client.get(f"/admin/console/requests/{req['id']}").text
-    assert 'title="written by an agent">verified by operator</span>' in detail
+    assert 'title="written by an agent"><span class="p">[agent] </span>verified by operator</span>' in detail
 
 
 def test_crafted_console_inputs_do_not_crash(console):
@@ -215,3 +215,105 @@ def test_failed_login_does_not_block_other_requests(client):
     for t in threads:
         t.join()
     assert time.monotonic() - started < 2
+
+
+def test_flash_messages_expire(console, monkeypatch):
+    import agent_helper.console as console_module
+
+    client, csrf = console
+    r = client.post("/admin/console/notify-test", data={"csrf": csrf}, follow_redirects=False)
+    link = r.headers["location"]
+    assert "Not delivered" in client.get(link).text
+    real = console_module.time.time
+    monkeypatch.setattr(console_module.time, "time", lambda: real() + console_module.FLASH_SECONDS + 5)
+    assert "Not delivered" not in client.get(link).text
+
+
+PUBLIC = "203.0.113.7"
+PROXY = "172.18.0.5"  # a reverse proxy on the container network
+
+
+def _admin(client, **headers):
+    return client.get("/admin/v1/requests", headers={"Authorization": f"Bearer {ADMIN_SECRET}", **headers}).status_code
+
+
+def test_default_allows_only_loopback(make_client):
+    assert _admin(make_client(peer="127.0.0.1", admin_allowed_nets="127.0.0.0/8,::1/128")) == 200
+    for peer in (PUBLIC, PROXY, "192.168.1.5", "::ffff:10.0.0.1"):
+        client = make_client(peer=peer, admin_allowed_nets="127.0.0.0/8,::1/128")
+        assert _admin(client) == 404
+        assert client.get("/admin/login").status_code == 404
+        assert client.get("/llms.txt").status_code == 200  # public routes are unaffected
+
+
+def test_through_a_trusted_proxy_the_forwarded_client_counts(make_client):
+    client = make_client(peer=PROXY, admin_allowed_nets="10.0.0.0/8", trusted_proxies="172.18.0.0/16")
+    assert _admin(client, **{"X-Forwarded-For": "10.1.2.3"}) == 200
+    assert _admin(client, **{"X-Forwarded-For": PUBLIC}) == 404
+
+
+def test_bypass_1_private_proxy_peer_without_trusted_proxies(make_client):
+    # A proxy on a private network forwards a public client. Without TRUSTED_PROXIES the peer (the proxy)
+    # counts, and it is not in the allowed list by default.
+    client = make_client(peer=PROXY, admin_allowed_nets="127.0.0.0/8,::1/128")
+    assert _admin(client, **{"X-Forwarded-For": PUBLIC}) == 404
+
+
+def test_bypass_2_forged_header_from_an_untrusted_peer(make_client):
+    client = make_client(peer=PUBLIC, admin_allowed_nets="127.0.0.0/8,10.0.0.0/8", trusted_proxies="172.18.0.0/16")
+    assert _admin(client, **{"X-Forwarded-For": "127.0.0.1"}) == 404
+    assert _admin(client, **{"X-Forwarded-For": "10.0.0.1"}) == 404
+
+
+def test_bypass_3_forged_left_entries_through_a_trusted_proxy(make_client):
+    client = make_client(peer=PROXY, admin_allowed_nets="127.0.0.0/8", trusted_proxies="172.18.0.0/16")
+    # The client prepends a loopback address; the proxy appends the real one.
+    assert _admin(client, **{"X-Forwarded-For": f"127.0.0.1, {PUBLIC}"}) == 404
+    # A trusted proxy that forwards nothing usable means deny, not "the proxy itself".
+    assert _admin(client) == 404
+    assert _admin(client, **{"X-Forwarded-For": "not-an-ip"}) == 404
+    assert _admin(client, **{"X-Forwarded-For": "172.18.0.9"}) == 404  # only proxies in the chain
+
+
+def test_invalid_network_entries_deny(make_client):
+    client = make_client(peer="127.0.0.1", admin_allowed_nets="127.0.0.0/8,oops")
+    assert _admin(client) == 404
+    client = make_client(peer=PROXY, admin_allowed_nets="10.0.0.0/8", trusted_proxies="172.18.0.0/16,bad")
+    assert _admin(client, **{"X-Forwarded-For": "10.1.2.3"}) == 404
+
+
+def test_default_admin_nets_are_loopback_only():
+    from agent_helper.config import DEFAULT_ADMIN_NETS, parse_networks
+    from agent_helper.limits import address_allowed
+
+    nets = parse_networks(DEFAULT_ADMIN_NETS)
+    assert address_allowed("127.0.0.1", nets) and address_allowed("::1", nets)
+    assert not address_allowed("192.168.1.5", nets) and not address_allowed("fd00::1", nets)
+    assert not address_allowed("203.0.113.7", nets) and not address_allowed("2001:db8::1", nets)
+    assert not address_allowed("testclient", nets)
+    assert address_allowed("anything", parse_networks("any"))
+
+
+def test_separate_admin_port(make_client):
+    # The test client talks to port 80.
+    on_admin = make_client(peer=PUBLIC, admin_port=80, admin_allowed_nets="127.0.0.0/8")
+    assert _admin(on_admin) == 200  # the source address does not matter on the admin port
+    assert on_admin.get("/admin/login").status_code == 200
+    assert on_admin.get("/llms.txt").status_code == 404  # nothing public on the admin port
+    assert on_admin.post("/v1/requests", json={"message": "x"}).status_code == 404
+
+    public = make_client(peer="127.0.0.1", admin_port=8081, admin_allowed_nets="any")
+    assert _admin(public) == 404  # no /admin on the public port, whatever the networks say
+    assert public.get("/admin/login").status_code == 404
+    assert public.get("/llms.txt").status_code == 200
+
+
+def test_serve_binds_both_ports():
+    from agent_helper.serve import bind
+
+    a, b = bind(0, "127.0.0.1"), bind(0, "127.0.0.1")
+    try:
+        assert a.getsockname()[1] != b.getsockname()[1]
+    finally:
+        a.close()
+        b.close()

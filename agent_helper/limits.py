@@ -76,16 +76,71 @@ def _address_key(raw: str) -> str:
     return str(addr)
 
 
-def client_key(scope: Scope, trust_proxy_headers: bool) -> str:
+def client_address(scope: Scope, trust_proxy_headers: bool) -> str:
+    """The client's address as seen by the nearest trusted proxy, or the socket peer."""
     if trust_proxy_headers:
         for name, value in scope.get("headers", []):
             if name == b"x-forwarded-for":
                 # The nearest trusted proxy appends the address it saw as the last element.
                 last = value.decode("latin-1").split(",")[-1].strip()
                 if last:
-                    return _address_key(last)
+                    return last
     client = scope.get("client")
-    return _address_key(client[0]) if client else "unknown"
+    return client[0] if client else "unknown"
+
+
+def client_key(scope: Scope, trust_proxy_headers: bool) -> str:
+    return _address_key(client_address(scope, trust_proxy_headers))
+
+
+Networks = tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]
+
+
+def _ip(raw: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        addr = ipaddress.ip_address(raw.strip())
+    except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    return addr
+
+
+def _in(addr: ipaddress.IPv4Address | ipaddress.IPv6Address, networks: Networks) -> bool:
+    return any(addr in net for net in networks if addr.version == net.version)
+
+
+def admin_client(scope: Scope, trusted_proxies: Networks) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The address the admin check applies to, or None (deny) when it cannot be determined.
+
+    The socket peer counts, unless it is a trusted proxy: then X-Forwarded-For is read from the right and
+    the first address that is not itself a trusted proxy counts. A trusted proxy that sends no usable
+    X-Forwarded-For means deny. Addresses further left are written by the client and never trusted.
+    """
+    client = scope.get("client")
+    peer = _ip(client[0]) if client else None
+    if peer is None or not _in(peer, trusted_proxies):
+        return peer
+    forwarded = [v.decode("latin-1") for k, v in scope.get("headers", []) if k == b"x-forwarded-for"]
+    hops = [h for line in forwarded for h in line.split(",")]
+    for hop in reversed(hops):
+        addr = _ip(hop)
+        if addr is None:
+            return None
+        if not _in(addr, trusted_proxies):
+            return addr
+    return None
+
+
+def address_allowed(
+    addr: ipaddress.IPv4Address | ipaddress.IPv6Address | str | None, networks: Networks | None
+) -> bool:
+    """Whether `addr` lies in one of `networks`. None as networks means every client is allowed."""
+    if networks is None:
+        return True
+    if isinstance(addr, str):
+        addr = _ip(addr)
+    return addr is not None and _in(addr, networks)
 
 
 def _loggable(path: str, max_length: int = 200) -> str:
@@ -113,7 +168,13 @@ class GuardMiddleware:
         trust_proxy_headers: bool,
         global_write_limiter: TokenBucket | None = None,
         self_limited_paths: frozenset[str] = frozenset(),
+        admin_networks: Networks | None = None,
+        trusted_proxies: Networks = (),
+        admin_port: int | None = None,
     ) -> None:
+        self.admin_networks = admin_networks
+        self.trusted_proxies = trusted_proxies
+        self.admin_port = admin_port
         self.app = app
         self.max_body_bytes = max_body_bytes
         self.read_limiter = read_limiter
@@ -123,6 +184,16 @@ class GuardMiddleware:
         # Endpoints that tell reads from writes only after parsing the body (the MCP endpoint). They are
         # charged as reads here and charge writes themselves.
         self.self_limited_paths = self_limited_paths
+
+    def _admin_refused(self, scope: Scope, is_admin_path: bool) -> bool:
+        """With a separate admin port, /admin exists only there and nothing else does; which address the
+        request comes from no longer matters (the port is published on the host's loopback only). Without
+        one, /admin is limited to ADMIN_ALLOWED_NETS."""
+        if self.admin_port is not None:
+            server = scope.get("server")
+            on_admin_port = server is not None and server[1] == self.admin_port
+            return is_admin_path != on_admin_port
+        return is_admin_path and not address_allowed(admin_client(scope, self.trusted_proxies), self.admin_networks)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -136,6 +207,14 @@ class GuardMiddleware:
         def done() -> None:
             ms = (time.monotonic() - started) * 1000
             log.info("%s %s %s %.0fms", method, _loggable(scope["path"]), status_holder["status"], ms)
+
+        path = scope["path"]
+        if self._admin_refused(scope, path == "/admin" or path.startswith("/admin/")):
+            # The admin API and console do not exist on this port or for this client.
+            status_holder["status"] = 404
+            await _send_json(send, 404, {"detail": "Not Found"}, [])
+            done()
+            return
 
         is_read = method in READ_METHODS or scope["path"] in self.self_limited_paths
         limiter = self.read_limiter if is_read else self.write_limiter
