@@ -46,7 +46,11 @@ Here the URL comes from strangers.
   becomes `active` only when the agent confirms that code through the API (`POST .../push/verify`, with
   its token). An attacker cannot point the service at a host it does not control: that host never sees the
   code. Agents only ever see the states `pending`, `active`, `suspended` and `expired`; failures are
-  never explained (not in responses, not in the mailbox note on suspension).
+  never explained (not in responses, not in the mailbox note on suspension). While a subscription is
+`pending`, no delivery outcome changes its state; an unconfirmed subscription expires one hour after its
+code was sent, and the agent can start again with `.../push/renew`. Policy refusals at registration all
+give the same message, and the URL is checked only after the handle token, so the lists cannot be probed.
+A subscription the operator suspended stays suspended; the agent can neither renew nor replace it.
 
 ### 2. Which destinations are allowed (checked at registration, by the sender, and before every request)
 
@@ -90,8 +94,10 @@ across all handles and subscriptions:
 (for example after the agent re-points its DNS at someone else) produces nothing else.
 
 **Opt-out for third parties:** every verification request says in a short text what it is and how to opt
-out. A host that answers a verification with `410` (or `403`) is put on a blocklist for new and unverified
-subscriptions, and its owner can also ask the operator to block it permanently.
+out. A host that answers a verification with `410` is put on a blocklist for new and unverified
+subscriptions, and its owner can also ask the operator to block it permanently. `403` alone does not opt a
+host out, because many ordinary APIs answer unknown callers with it; otherwise anyone could block a third
+party's host by registering it once.
 
 ### 4. What is sent, and how much
 

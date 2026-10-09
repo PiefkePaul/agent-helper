@@ -1500,6 +1500,9 @@ class Store:
             reg = self._owns(handle, handle_token)
             if reg is None:
                 return None
+            old = self._push_row(reg["skeleton"])
+            if old is not None and old["suspended_reason"] == "operator":
+                raise PushRefused("the operator paused push notices for this handle; ask with POST /v1/requests", 409)
             self._db.execute("DELETE FROM push_subscriptions WHERE handle_key = ?", (reg["skeleton"],))
             self._db.execute(
                 "INSERT INTO push_subscriptions (id, handle_key, handle, url, host, events, secret, status,"
@@ -1638,6 +1641,12 @@ class Store:
                 "UPDATE push_subscriptions SET status = 'expired' WHERE status = 'active' AND expires_at <= ?",
                 (now(),),
             )
+            # A verification that was never confirmed (lost, capped, refused, unanswered) ends here.
+            self._db.execute(
+                "UPDATE push_subscriptions SET status = 'expired', verify_code_hash = NULL"
+                " WHERE status = 'pending' AND verify_sent = 1 AND verify_expires < ?",
+                (time.time(),),
+            )
             rows = self._db.execute(
                 "SELECT * FROM push_subscriptions WHERE status = 'active' AND reminder_sent = 0 AND expires_at <= ?",
                 (_in_days(PUSH_REMINDER_DAYS),),
@@ -1651,7 +1660,9 @@ class Store:
         handle's mailbox."""
         with self._tx():
             row = self._db.execute("SELECT * FROM push_subscriptions WHERE id = ?", (sub_id,)).fetchone()
-            if row is None or row["status"] in ("suspended", "expired"):
+            # While pending, no outcome changes anything: the agent must not learn how its URL behaved
+            # (0020, step 1). An unconfirmed subscription simply expires.
+            if row is None or row["status"] != "active":
                 return
             reason = None
             if outcome == "delivered":
@@ -1661,7 +1672,7 @@ class Store:
                     reason = "failures"
                 self._db.execute("UPDATE push_subscriptions SET failures = failures + 1 WHERE id = ?", (sub_id,))
             elif outcome == "tls_failure":
-                if row["tls_failures"] + 1 >= PUSH_MAX_TLS_FAILURES or kind == "verify":
+                if row["tls_failures"] + 1 >= PUSH_MAX_TLS_FAILURES:
                     reason = "tls"
                 self._db.execute(
                     "UPDATE push_subscriptions SET tls_failures = tls_failures + 1 WHERE id = ?", (sub_id,)

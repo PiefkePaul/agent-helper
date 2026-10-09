@@ -335,6 +335,46 @@ def test_relay_rechecks_urls_and_deny_lists(tmp_path):
     assert _outcomes(sender) == {"job_1": "refused", "job_2": "refused", "job_3": "refused"}
 
 
+def test_403_does_not_opt_a_host_out(tmp_path):
+    sender, post, clock = _sender(tmp_path, Attempt(status=403))
+    sender.submit([_job(1, kind="verify")])
+    sender.run_due()
+    assert _outcomes(sender) == {"job_1": "failed"}
+    clock.now += 3600
+    sender.submit([_job(2, kind="verify")])
+    sender.run_due()
+    assert _outcomes(sender)["job_2"] == "delivered"
+
+
+def test_a_verification_retry_is_not_capped(tmp_path):
+    sender, post, clock = _sender(tmp_path, Attempt(status=None))
+    sender.submit([_job(1, kind="verify")])
+    sender.run_due()
+    clock.now += 30
+    sender.run_due()
+    assert _outcomes(sender) == {"job_1": "delivered"}
+    assert len(post.calls) == 2
+
+
+def test_the_next_address_is_tried_when_one_does_not_answer(tmp_path):
+    sender, post, _ = _sender(tmp_path, Attempt(status=None), resolver=lambda h, p: [PUBLIC_V6, PUBLIC_V4])
+    sender.submit([_job()])
+    sender.run_due()
+    assert [c[1] for c in post.calls] == [PUBLIC_V6, PUBLIC_V4]
+    assert _outcomes(sender) == {"job_1": "delivered"}
+
+
+def test_a_name_server_that_never_answers_is_cut_off(monkeypatch):
+    import agent_helper.pushcheck as pc
+
+    monkeypatch.setattr(pc, "RESOLVE_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(pc.socket, "getaddrinfo", lambda *a, **k: time.sleep(2))
+    started = time.monotonic()
+    with pytest.raises(DestinationRefused):
+        public_addresses("slow.example.com", 443)
+    assert time.monotonic() - started < 1
+
+
 def test_opt_out_on_410_is_remembered_across_restarts(tmp_path):
     sender, post, clock = _sender(tmp_path, Attempt(status=410))
     sender.submit([_job(1, kind="verify")])
@@ -427,6 +467,14 @@ def test_relay_api_validates_jobs(tmp_path):
             client.post("/v1/relay/jobs", content=body, headers=_signed("POST", "/v1/relay/jobs", body)).status_code
             == 400
         )
+
+
+def test_relay_refuses_large_bodies_before_reading_them(tmp_path):
+    client, _ = _relay_client(tmp_path)
+    body = b"x" * (200 * 1024)
+    response = client.post("/v1/relay/jobs", content=body, headers=_signed("POST", "/v1/relay/jobs", body))
+    assert response.status_code == 413
+    assert client.post("/v1/relay/jobs", content=body).status_code == 401
 
 
 def test_relay_needs_a_long_secret(tmp_path):
@@ -680,10 +728,71 @@ def test_tls_failures_suspend_fast_and_opt_out_suspends(pushing):
     auth = {"Authorization": f"Bearer {token2}"}
     client.put("/v1/handles/orbit/push", json={"url": "https://other.example.org/in"}, headers=auth)
     sender.post.results = [Attempt(status=410)]
+    store = client.app.state.store
     push.tick()
     sender.run_due()
     push.tick()  # collects the outcome
-    assert client.get("/v1/handles/orbit/push", headers=auth).json()["subscription"]["status"] == "suspended"
+    # While pending, nothing about the URL's behaviour shows; an unconfirmed subscription just expires.
+    assert client.get("/v1/handles/orbit/push", headers=auth).json()["subscription"]["status"] == "pending"
+    store._db.execute("UPDATE push_subscriptions SET verify_expires = 1 WHERE handle = 'orbit'")
+    push._last_sweep = -1e9
+    push.tick()
+    assert client.get("/v1/handles/orbit/push", headers=auth).json()["subscription"]["status"] == "expired"
+
+
+def test_pending_outcomes_reveal_nothing(pushing):
+    client, push, sender, _ = pushing
+    store = client.app.state.store
+    auth = {"Authorization": f"Bearer {_handle(client)}"}
+    client.put("/v1/handles/nova/push", json={"url": "https://hooks.example.com/in"}, headers=auth)
+    sub_id = store.list_push_admin()[0]["id"]
+    for outcome in ("refused", "tls_failure", "failed", "capped", "opted_out"):
+        store.push_outcome(sub_id, "verify", outcome, push.limits)
+        assert client.get("/v1/handles/nova/push", headers=auth).json()["subscription"]["status"] == "pending"
+    assert _mailbox(client, auth["Authorization"][7:]) == []
+
+
+def test_operator_suspension_survives_a_new_registration(pushing, admin_headers):
+    client, push, sender, _ = pushing
+    token = _handle(client)
+    _verify(client, push, sender, token)
+    sub_id = client.get("/admin/v1/push", headers=admin_headers).json()[0]["id"]
+    client.post(f"/admin/v1/push/{sub_id}/suspend", headers=admin_headers)
+    auth = {"Authorization": f"Bearer {token}"}
+    again = client.put("/v1/handles/nova/push", json={"url": "https://elsewhere.example.org/"}, headers=auth)
+    assert again.status_code == 409
+
+
+def test_url_rules_are_not_shown_to_strangers(pushing):
+    client, _, _, _ = pushing
+    _handle(client)
+    response = client.put(
+        "/v1/handles/nova/push", json={"url": "https://10.0.0.1/"}, headers={"Authorization": "Bearer x"}
+    )
+    assert response.status_code == 404
+
+
+def test_policy_refusals_look_the_same():
+    messages = set()
+    for url, kw in (
+        ("https://own.example/x", {"deny_domains": ["own.example"]}),
+        ("https://x.example/x", {"allow_domains": ["agents.example"]}),
+        ("https://printer.local/x", {}),
+    ):
+        with pytest.raises(DestinationRefused) as exc:
+            check_url(url, **kw)
+        messages.add(str(exc.value))
+    assert len(messages) == 1
+
+
+@pytest.mark.parametrize("dot", ["。", "．", "｡"])
+def test_unicode_trailing_dots_do_not_bypass_deny_lists(dot):
+    with pytest.raises(DestinationRefused):
+        check_url(f"https://own.example{dot}/x", deny_domains=["*.own.example"])
+    with pytest.raises(DestinationRefused):
+        check_url(f"https://printer.local{dot}/x")
+    with pytest.raises(DestinationRefused):
+        check_url(f"https://1.2.3.4{dot}/x")
 
 
 def test_relay_outage_keeps_jobs_briefly(pushing):

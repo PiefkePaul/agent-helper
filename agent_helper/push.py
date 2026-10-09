@@ -27,7 +27,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from .config import Settings
-from .pushcheck import Destination, check_url, parse_list
+from .pushcheck import Destination, DestinationRefused, check_url, parse_list
 from .relay import MAX_JOBS_PER_CALL, OUTCOMES, sign
 from .store import PUSH_EVENTS, MailLimits, Store
 
@@ -36,7 +36,8 @@ log = logging.getLogger("agent_helper.push")
 MAX_BODY = 1024
 TICK_SECONDS = 2.0
 SWEEP_SECONDS = 600.0
-OUTBOX_MAX_AGE = 240.0  # a notice older than this is useless to a receiver with a 5-minute window
+# The relay may retry for up to 3.5 minutes; together a notice stays inside receivers' 5-minute window.
+OUTBOX_MAX_AGE = 60.0
 OUTSTANDING_MAX_AGE = 900.0
 OPT_OUT_TEXT = (
     "This is a one-time check from an agent-helper service: someone registered this URL to receive short "
@@ -217,6 +218,11 @@ class PushManager:
         }
 
     def _queue(self, sub: dict[str, Any], kind: str, payload: dict[str, Any]) -> None:
+        try:
+            self.check(sub["url"])  # the lists may have changed since registration
+        except DestinationRefused:
+            self.store.push_outcome(sub["id"], kind, "refused", self.limits)
+            return
         # Ids are short, but the body must stay under 1 KiB whatever they hold: drop the oldest ones.
         while True:
             try:

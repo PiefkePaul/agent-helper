@@ -20,6 +20,8 @@ MAX_URL_LENGTH = 512
 LOCAL_SUFFIXES = (".local", ".internal", ".lan", ".home.arpa", ".localhost", ".onion", ".test", ".invalid")
 TIMEOUT_SECONDS = 5.0
 MAX_RESPONSE_BYTES = 1024
+RESOLVE_TIMEOUT_SECONDS = 3.0
+HOST_REFUSED = "this host cannot receive push notices from here; use a public host name you control"
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
@@ -82,7 +84,11 @@ def normalize_host(host: str) -> str:
         ascii_host = host.encode("idna").decode("ascii")
     except UnicodeError:
         raise DestinationRefused("host name is not valid IDNA") from None
-    return ascii_host.lower()
+    # Full-width and ideographic dots become ASCII dots only now, so strip again and check the labels.
+    ascii_host = ascii_host.lower().rstrip(".")
+    if not ascii_host or any(not label for label in ascii_host.split(".")):
+        raise DestinationRefused("host name is not valid")
+    return ascii_host
 
 
 def matches(host: str, patterns: Iterable[str]) -> bool:
@@ -138,12 +144,11 @@ def check_url(
         pass
     else:
         raise DestinationRefused("use a host name, not an IP address")
-    if "." not in host or host.endswith(LOCAL_SUFFIXES):
-        raise DestinationRefused("the host name must be a public DNS name")
-    if matches(host, deny_domains):
-        raise DestinationRefused("this host is not allowed")
+    # One message for every policy refusal, so probing names reveals nothing about the lists.
+    if "." not in host or host.endswith(LOCAL_SUFFIXES) or matches(host, deny_domains):
+        raise DestinationRefused(HOST_REFUSED)
     if allow_domains is not None and not matches(host, allow_domains):
-        raise DestinationRefused("this host is not on the allowlist")
+        raise DestinationRefused(HOST_REFUSED)
     path = parts.path or "/"
     if parts.query:
         path += "?" + parts.query
@@ -162,8 +167,22 @@ Resolver = Callable[[str, int], list[str]]
 
 
 def system_resolver(host: str, port: int) -> list[str]:
-    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
-    return sorted({str(info[4][0]) for info in infos})
+    """getaddrinfo with a hard timeout (it has none of its own). Keeps the resolver's order (RFC 6724)."""
+    result: list[list[str]] = []
+
+    def run() -> None:
+        try:
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
+            result.append(list(dict.fromkeys(str(info[4][0]) for info in infos)))
+        except Exception:  # noqa: BLE001 (any resolver failure means "does not resolve")
+            result.append([])
+
+    worker = threading.Thread(target=run, name="agent-helper-resolve", daemon=True)
+    worker.start()
+    worker.join(RESOLVE_TIMEOUT_SECONDS)
+    if not result:
+        raise OSError("resolver timeout")
+    return result[0]
 
 
 def public_addresses(
@@ -197,9 +216,12 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self._address = address
         self._ssl_context = context
 
+    raw: socket.socket | None = None
+
     def connect(self) -> None:
-        sock = socket.create_connection((self._address, self.port), self.timeout)
-        self.sock = self._ssl_context.wrap_socket(sock, server_hostname=self.host)
+        # Kept so the deadline can cut a stalled handshake, before `self.sock` exists.
+        self.raw = socket.create_connection((self._address, self.port), self.timeout)
+        self.sock = self._ssl_context.wrap_socket(self.raw, server_hostname=self.host)
 
 
 @dataclass(frozen=True)
@@ -238,12 +260,12 @@ def pinned_post(
     worker.start()
     worker.join(timeout + 1)
     if not result:
-        sock = conn.sock
-        if sock is not None:
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
+        for sock in (conn.sock, conn.raw):
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
         conn.close()
         worker.join(1)
         return Attempt(status=None)

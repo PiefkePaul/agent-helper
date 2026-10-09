@@ -574,6 +574,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @v1.put("/handles/{handle}/push", tags=["push"], dependencies=[Depends(require_push)])
     def put_push(handle: HandlePath, body: PushIn, authorization: AuthHeader = None) -> JSONResponse:
+        # The token first: strangers learn nothing about the URL rules from this endpoint.
+        if store.get_push(handle, _bearer(authorization)) is None:
+            raise HTTPException(404, NOT_FOUND)
         try:
             dest = app.state.push.check(body.url)
         except DestinationRefused as exc:

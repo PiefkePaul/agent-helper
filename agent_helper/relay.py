@@ -50,6 +50,9 @@ RETRY_DELAYS = (30.0, 180.0)  # before the second and third attempt; a notice is
 MAX_JOBS_PER_CALL = 50
 MAX_OUTCOMES = 10_000
 MAX_QUEUE = 5_000
+WORKERS = 8  # one slow name server or endpoint must not hold up everyone else
+MAX_REQUEST_BYTES = 128 * 1024
+MAX_OPT_OUTS = 100_000
 OUTCOMES = ("delivered", "failed", "tls_failure", "opted_out", "refused", "capped")
 
 
@@ -145,7 +148,8 @@ class Sender:
         self._optout: set[str] = set()
         if self._optout_file.exists():
             self._optout = {line.strip() for line in self._optout_file.read_text("utf-8").splitlines() if line}
-        self._thread: threading.Thread | None = None
+        self._threads: list[threading.Thread] = []
+        self._caps_lock = threading.Lock()
         self._stopped = False
 
     # --- intake ---------------------------------------------------------------------------------
@@ -176,14 +180,16 @@ class Sender:
 
     def _start(self) -> None:
         with self._lock:
-            if self._thread is None or not self._thread.is_alive():
-                self._thread = threading.Thread(target=self._run, name="agent-helper-relay", daemon=True)
-                self._thread.start()
+            self._threads = [t for t in self._threads if t.is_alive()]
+            while len(self._threads) < WORKERS:
+                thread = threading.Thread(target=self._run, name="agent-helper-relay", daemon=True)
+                thread.start()
+                self._threads.append(thread)
 
     def stop(self) -> None:
         with self._lock:
             self._stopped = True
-            self._wake.notify()
+            self._wake.notify_all()
 
     def _run(self) -> None:
         while True:
@@ -237,24 +243,36 @@ class Sender:
             )
             if kind == "verify" and dest.host in self._optout:
                 raise DestinationRefused("host opted out")
-            addresses = public_addresses(dest.host, dest.port, self.settings.deny_nets, self.resolver)
         except DestinationRefused as exc:
             log.info("push refused: %s", exc)
             self._record(job, "opted_out" if str(exc) == "host opted out" else "refused")
             return
-
-        address = addresses[0]
-        if not self._take_caps(dest, address, kind):
+        # Caps that need no DNS come first, so a name server that never answers is capped too.
+        if not self._take_name_caps(dest, kind, item.attempt):
+            self._record(job, "capped")
+            return
+        try:
+            addresses = public_addresses(dest.host, dest.port, self.settings.deny_nets, self.resolver)
+        except DestinationRefused as exc:
+            log.info("push refused: %s", exc)
+            self._record(job, "refused")
+            return
+        if not self._take_address_caps(addresses[0]):
             self._record(job, "capped")
             return
 
         body = job["body"].encode() if isinstance(job["body"], str) else bytes(job["body"])
-        attempt = self.post(dest, address, dict(job.get("headers", {})), body)
+        attempt = Attempt(status=None)
+        for address in addresses[:4]:  # resolver order; the next one only if this one did not answer
+            attempt = self.post(dest, address, dict(job.get("headers", {})), body)
+            if attempt.status is not None or attempt.tls_failure:
+                break
         if attempt.tls_failure:
             self._record(job, "tls_failure")
         elif attempt.status is not None and 200 <= attempt.status < 300:
             self._record(job, "delivered")
-        elif kind == "verify" and attempt.status in (403, 410):
+        elif kind == "verify" and attempt.status == 410:
+            # Only 410 opts a host out: 403 is what many ordinary APIs answer to an unknown caller.
             self._opt_out(dest.host)
             self._record(job, "opted_out")
         elif attempt.status is None or attempt.status == 429 or attempt.status >= 500:
@@ -263,23 +281,27 @@ class Sender:
         else:
             self._record(job, "failed")
 
-    def _take_caps(self, dest: Destination, address: Any, kind: str | None) -> bool:
+    def _take_name_caps(self, dest: Destination, kind: str | None, attempt: int) -> bool:
         now = self.clock()
-        if kind == "verify":
-            if len(self._verify_last) > 50_000:
-                self._verify_last = {h: t for h, t in self._verify_last.items() if now - t < 3600}
-            last = self._verify_last.get(dest.host)
-            if last is not None and now - last < 3600:
-                return False
-            self._verify_last[dest.host] = now
-        for key in (str(address), _network_key(address), registrable_domain(dest.host)):
-            if self._per_destination.take(key, now=now) > 0:
-                return False
+        if kind == "verify" and attempt == 1:  # retries of an admitted verification are not new ones
+            with self._caps_lock:
+                if len(self._verify_last) > 50_000:
+                    self._verify_last = {h: t for h, t in self._verify_last.items() if now - t < 3600}
+                last = self._verify_last.get(dest.host)
+                if last is not None and now - last < 3600:
+                    return False
+                self._verify_last[dest.host] = now
+        if self._per_destination.take(registrable_domain(dest.host), now=now) > 0:
+            return False
         return self._global.take("global", now=now) == 0
+
+    def _take_address_caps(self, address: Any) -> bool:
+        now = self.clock()
+        return all(self._per_destination.take(key, now=now) == 0 for key in (str(address), _network_key(address)))
 
     def _opt_out(self, host: str) -> None:
         with self._lock:
-            if host in self._optout:
+            if host in self._optout or len(self._optout) >= MAX_OPT_OUTS:
                 return
             self._optout.add(host)
             try:
@@ -313,19 +335,23 @@ def create_relay_app(settings: RelaySettings, sender: Sender | None = None) -> F
     app.state.sender = sender
 
     async def authenticate(request: Request) -> bytes:
-        body = await request.body()
         timestamp = request.headers.get("x-relay-timestamp", "")
         given = request.headers.get("x-relay-signature", "")
         nonce = request.headers.get("x-relay-nonce", "")
-        if not 16 <= len(nonce) <= 64:
+        if not 16 <= len(nonce) <= 64 or not timestamp.isdigit() or len(given) != 71:
             raise HTTPException(401, "unauthorized")
-        try:
-            age = abs(time.time() - int(timestamp))
-        except ValueError:
-            raise HTTPException(401, "unauthorized") from None
+        age = abs(time.time() - int(timestamp))
+        if age > SIGNATURE_WINDOW_SECONDS:
+            raise HTTPException(401, "unauthorized")
+        # Read the body only now, and never more than the largest valid call.
+        body = b""
+        async for chunk in request.stream():
+            body += chunk
+            if len(body) > MAX_REQUEST_BYTES:
+                raise HTTPException(413, "too large")
         path = request.url.path + (f"?{request.url.query}" if request.url.query else "")
         expected = sign(settings.secret, timestamp, nonce, request.method, path, body)
-        if age > SIGNATURE_WINDOW_SECONDS or not hmac.compare_digest(given.encode(), expected.encode()):
+        if not hmac.compare_digest(given.encode(), expected.encode()):
             raise HTTPException(401, "unauthorized")
         if not seen.first_time(given, time.time()):
             raise HTTPException(401, "unauthorized")
