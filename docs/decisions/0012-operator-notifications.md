@@ -43,3 +43,11 @@ automation tool and a chat app, so the service does not need its own mail, push 
   stays down. A digest reports such losses while the process runs. The database stays the source of
   truth: `GET /admin/v1/requests?status=open` lists every conversation that waits for the operator.
 - The webhook URL may contain a secret (for example a bot token), so it is never logged.
+- Every event contains the agent-chosen `handle` (up to 64 letters, digits, spaces, `.`, `_` and `-`,
+  so it can read like an instruction). Receivers must treat it, like `untrusted_preview`, as data: an automation
+  that hands events to a language model must not let it follow instructions found there.
+- The service warns at start when the webhook has no `NOTIFY_WEBHOOK_SECRET` (anyone who learns the
+  URL could forge events) or uses plain `http://` to a public host, and refuses a URL without a host,
+  with a bad port, or with spaces or control characters.
+- Each delivery attempt has an overall deadline of about 6 seconds; then its connection is closed, so
+  a receiver that answers very slowly can neither hold up the worker nor pile up open connections.
