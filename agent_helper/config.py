@@ -25,6 +25,8 @@ DEFAULT_NOTIFY_EVENTS = frozenset(
     {"request.created", "request.message", "report.created", "request.closed", "capability.requested"}
 )
 
+PUSH_MODES = ("off", "public", "allowlist")
+
 log = logging.getLogger("agent_helper")
 
 
@@ -64,6 +66,32 @@ def _webhook_url(raw: str | None) -> str | None:
     if parts.scheme.lower() == "http" and not _is_private_host(host):
         log.warning("NOTIFY_WEBHOOK_URL uses plain http to a public host; events travel unencrypted")
     return raw
+
+
+def _relay_url(raw: str | None) -> str | None:
+    """The push relay's base URL (docs/decisions/0020, step 9). Only https; the relay is reached over the
+    internet and the channel carries signed notices."""
+    if not raw:
+        return None
+    try:
+        parts = urlsplit(raw)
+        host = parts.hostname
+        parts.port  # noqa: B018 (raises ValueError for a bad port)
+    except ValueError:
+        parts, host = None, None
+    bad = any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in raw)
+    if parts is None or parts.scheme.lower() != "https" or not host or bad or parts.query or parts.fragment:
+        log.warning("RELAY_URL must be an https URL with a host and no query; push notifications are disabled")
+        return None
+    return raw.rstrip("/")
+
+
+def _push_mode(raw: str | None) -> str:
+    mode = (raw or "off").strip().lower()
+    if mode not in PUSH_MODES:
+        log.warning("PUSH_MODE must be one of %s; push notifications are disabled", ", ".join(PUSH_MODES))
+        return "off"
+    return mode
 
 
 def parse_networks(raw: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] | None:
@@ -133,6 +161,13 @@ class Settings:
     notify_events: frozenset[str] = DEFAULT_NOTIFY_EVENTS
     notify_include_preview: bool = False
     notify_max_per_minute: int = 30
+    push_mode: str = "off"
+    push_allowed_domains: str = ""
+    push_deny_domains: str = ""
+    push_allowed_ports: str = "443"
+    relay_url: str | None = None
+    relay_secret: str | None = None
+    relay_ca_file: Path | None = None
 
     @property
     def db_path(self) -> Path:
@@ -141,6 +176,16 @@ class Settings:
     @property
     def admin_enabled(self) -> bool:
         return self.admin_secret is not None and len(self.admin_secret) >= MIN_ADMIN_SECRET_LENGTH
+
+    @property
+    def push_enabled(self) -> bool:
+        """Push needs the switch and a configured relay; without the relay nothing is accepted."""
+        return (
+            self.push_mode != "off"
+            and self.relay_url is not None
+            and self.relay_secret is not None
+            and len(self.relay_secret) >= MIN_ADMIN_SECRET_LENGTH
+        )
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -168,7 +213,20 @@ class Settings:
             notify_events=_events("NOTIFY_EVENTS", cls.notify_events),
             notify_include_preview=_bool("NOTIFY_INCLUDE_PREVIEW", cls.notify_include_preview),
             notify_max_per_minute=_int("NOTIFY_MAX_PER_MIN", cls.notify_max_per_minute),
+            push_mode=_push_mode(os.environ.get("PUSH_MODE")),
+            push_allowed_domains=os.environ.get("PUSH_ALLOWED_DOMAINS", ""),
+            push_deny_domains=os.environ.get("PUSH_DENY_DOMAINS", ""),
+            push_allowed_ports=os.environ.get("PUSH_ALLOWED_PORTS") or cls.push_allowed_ports,
+            relay_url=_relay_url(os.environ.get("RELAY_URL")),
+            relay_secret=os.environ.get("RELAY_SECRET") or None,
+            relay_ca_file=Path(os.environ["RELAY_CA_FILE"]) if os.environ.get("RELAY_CA_FILE") else None,
         )
+        if settings.push_mode != "off" and not settings.push_enabled:
+            log.warning(
+                "PUSH_MODE is on, but RELAY_URL or RELAY_SECRET (at least %d characters) is missing; "
+                "push notifications are disabled",
+                MIN_ADMIN_SECRET_LENGTH,
+            )
         if settings.notify_webhook_url and not settings.notify_webhook_secret:
             log.warning(
                 "NOTIFY_WEBHOOK_SECRET is not set; anyone who learns the webhook URL can send fake events to it"

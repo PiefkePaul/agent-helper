@@ -1,7 +1,6 @@
 # 0020: Push notifications to agents' own endpoints (security design)
 
-- Status: proposed (design only; no code until this is reviewed and the operator has chosen the egress
-  path, see "Open operator decision")
+- Status: accepted (2026-10-09: the operator chose a dedicated relay server, see step 9)
 - Date: 2026-10-09
 - Related: [0012](0012-operator-notifications.md) (operator webhook), [0013](0013-agent-directory-and-mailboxes.md),
   [0019](0019-a2a-adapter.md) (A2A push left out)
@@ -47,7 +46,11 @@ Here the URL comes from strangers.
   becomes `active` only when the agent confirms that code through the API (`POST .../push/verify`, with
   its token). An attacker cannot point the service at a host it does not control: that host never sees the
   code. Agents only ever see the states `pending`, `active`, `suspended` and `expired`; failures are
-  never explained (not in responses, not in the mailbox note on suspension).
+  never explained (not in responses, not in the mailbox note on suspension). While a subscription is
+`pending`, no delivery outcome changes its state; an unconfirmed subscription expires one hour after its
+code was sent, and the agent can start again with `.../push/renew`. Policy refusals at registration all
+give the same message, and the URL is checked only after the handle token, so the lists cannot be probed.
+A subscription the operator suspended stays suspended; the agent can neither renew nor replace it.
 
 ### 2. Which destinations are allowed (checked at registration, by the sender, and before every request)
 
@@ -91,8 +94,10 @@ across all handles and subscriptions:
 (for example after the agent re-points its DNS at someone else) produces nothing else.
 
 **Opt-out for third parties:** every verification request says in a short text what it is and how to opt
-out. A host that answers a verification with `410` (or `403`) is put on a blocklist for new and unverified
-subscriptions, and its owner can also ask the operator to block it permanently.
+out. A host that answers a verification with `410` is put on a blocklist for new and unverified
+subscriptions, and its owner can also ask the operator to block it permanently. `403` alone does not opt a
+host out, because many ordinary APIs answer unknown callers with it; otherwise anyone could block a third
+party's host by registering it once.
 
 ### 4. What is sent, and how much
 
@@ -111,7 +116,9 @@ subscriptions, and its owner can also ask the operator to block it permanently.
 
 Each push carries `X-Agent-Helper-Signature: sha256=<HMAC-SHA256>` over `<timestamp>.<event_id>.<body>`,
 with headers `X-Agent-Helper-Timestamp` and `X-Agent-Helper-Event-Id`. The HMAC key is a random secret
-created per subscription and shown once at registration. Receivers check the signature over the raw body,
+created per subscription and shown once at registration; it stays with the service and never goes to
+the relay: the service builds and signs each notice, and the relay sends it unchanged. Receivers check the
+signature over the raw body,
 reject timestamps older than 5 minutes, and drop repeated event ids. The body names the instance id
 (0017), so agents can match it against `/.well-known/agent-helper.json`.
 
@@ -119,10 +126,10 @@ reject timestamps older than 5 minutes, and drop repeated event ids. The body na
 
 - **A separate sender container.** It has its own network with internet egress only and **no** route to
   the host, the LAN, other containers or the database, enforced by firewall rules, not only by network
-  membership. It holds no database credentials: the service hands it narrow jobs
-  (`{subscription_id, url, body, secret}`) over a dedicated channel, and receives only `delivered` or
-  `failed` (plus the suspension triggers above) back. It resolves and checks destinations itself, because
-  its view of DNS is the one that counts.
+  membership. It holds no database credentials and no subscription secrets: the service hands it narrow,
+  already signed jobs (`{job_id, kind, url, body, event_id, timestamp, signature}`) over the channel described in step 9, and
+  gets back only an outcome per job. It resolves and checks destinations itself, because its view of DNS
+  is the one that counts.
 - **Its own public DNS resolver**, not the container runtime's embedded resolver and not a resolver with a
   split-horizon view of the operator's network, so internal names never resolve.
 - **Egress through a different public address** than the one the service is reachable at: pushes can then
@@ -131,7 +138,8 @@ reject timestamps older than 5 minutes, and drop repeated event ids. The body na
 
 ### 7. Retries and failure
 
-Up to 3 attempts (after 30 s and 5 min) on network errors, `429` and `5xx`; none on other `4xx`; TLS
+Up to 3 attempts (after 30 s and 3 min, so a notice is never older than the receivers' 5-minute window)
+on network errors, `429` and `5xx`; none on other `4xx`; TLS
 failures as in step 3. After 20 consecutive failed pushes, a destination that fails the checks of step 2,
 or an opt-out, the subscription is suspended and the agent finds a note in its mailbox (without the
 reason). It can re-verify to resume, subject to the caps.
@@ -145,13 +153,36 @@ reason). It can re-verify to resume, subject to the caps.
 - A2A push (`CreateTaskPushNotificationConfig`, 0019) will be mapped onto the same subscriptions and the
   same sender, with no second code path.
 
-## Open operator decision
+### 9. The relay and its channel (decided 2026-10-09)
 
-How the sender gets its separate egress address is the operator's decision and is **not** made here:
-for example a VPN exit, a small external relay or a hosted egress service, each with its own cost and
-trust. Implementation starts only after that choice. Until then `PUSH_MODE` stays `off`. Neither the
-choice nor any concrete host names, addresses or networks of the operator are recorded in this
-repository; they belong in the live configuration.
+The operator provides a dedicated server with its own public address, its own resolver and no route back
+into the operator's network. The sender runs there as its own container (`python -m agent_helper.relay`,
+same image, no database). How the server is set up is an operations matter; no host names, addresses or
+providers are recorded in this repository.
+
+- **The service pushes, the relay never calls in.** The service opens outbound HTTPS connections to the
+  relay (`RELAY_URL`) to hand over jobs (`POST /v1/relay/jobs`) and to collect outcomes
+  (`GET /v1/relay/outcomes?after=<n>`, polled every few seconds while there is work). The service's host
+  needs no inbound port for this and no route from the relay; only outbound HTTPS to the relay's address.
+- **Authentication without a shared CA.** Every call carries `X-Relay-Timestamp`, `X-Relay-Nonce` (random,
+  16 to 64 characters) and `X-Relay-Signature: sha256=<HMAC>` over
+  `<timestamp>.<nonce>.<method>.<path and query>.<body>` with `RELAY_SECRET` (at least 32 random
+  characters, configured on both sides). The relay refuses calls older than 60 seconds and repeated
+  signatures; the nonce keeps two identical calls in the same second from looking like a replay. The relay is served over HTTPS with a certificate the service
+  verifies (`RELAY_CA_FILE` may name a private CA); the service refuses a plain `http://` relay URL.
+- **Small, signed jobs.** A job carries the destination URL, the 1 KiB body, the kind (`verify` or
+  `notice`), a job id, and the event id, timestamp and signature of the notice as strictly checked values.
+  The relay accepts no header names from jobs: it builds the request headers itself from a fixed set, so
+  even a compromised service cannot make it send `Authorization`, `Host` or other headers. The opt-out
+  list applies to every job, not only to verifications. Every call from the service to the relay has one
+  overall deadline, so a slow relay cannot stall the service's push thread. Outcomes come back as one of `delivered`,
+  `failed`, `tls_failure`, `opted_out`, `refused` (destination checks) or `capped`. Nothing else crosses
+  back, so a compromised relay learns neither tokens nor subscription secrets nor content, and cannot read
+  or change anything in the service.
+- **The relay keeps only what it needs in memory:** the per-destination counters, the opt-out list (also
+  written to a small file in its own volume) and the outcomes not yet collected.
+- **Defaults stay safe.** `PUSH_MODE=off` unless the operator turns it on; without `RELAY_URL` and
+  `RELAY_SECRET` the service never accepts subscriptions.
 
 ## Consequences
 

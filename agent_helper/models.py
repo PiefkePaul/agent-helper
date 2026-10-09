@@ -327,3 +327,19 @@ class CapabilityDecisionIn(BaseModel):
     status: CapabilityRequestStatus | None = None
     note: OperatorNote = None  # type: ignore[valid-type]
     capability_id: Annotated[str | None, Field(max_length=64, pattern=r"^[a-z0-9][a-z0-9-]*$")] = None
+
+
+PushEvent = Literal["request.reply", "mail.received", "referral.received"]
+
+
+class PushIn(BaseModel):
+    """A push subscription (docs/decisions/0020). The URL is checked again before every delivery."""
+
+    url: Annotated[str, Field(min_length=8, max_length=512)]
+    events: list[PushEvent] = Field(
+        default_factory=lambda: ["request.reply", "mail.received", "referral.received"], min_length=1, max_length=3
+    )
+
+
+class PushVerifyIn(BaseModel):
+    code: Annotated[str, Field(min_length=1, max_length=64)]

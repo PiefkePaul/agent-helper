@@ -186,6 +186,33 @@ CREATE TABLE IF NOT EXISTS capability_votes (
     PRIMARY KEY (request_id, voter_key)
 );
 
+-- Push subscriptions (docs/decisions/0020): one per handle. The secret signs notices and never leaves the
+-- service; the verification code is stored only as a hash.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id               TEXT PRIMARY KEY,
+    handle_key       TEXT NOT NULL UNIQUE,
+    handle           TEXT NOT NULL,
+    url              TEXT NOT NULL,
+    host             TEXT NOT NULL,
+    events           TEXT NOT NULL,
+    secret           TEXT NOT NULL,
+    status           TEXT NOT NULL CHECK (status IN ('pending', 'active', 'suspended', 'expired')),
+    created_at       TEXT NOT NULL,
+    verified_at      TEXT,
+    expires_at       TEXT,
+    verify_code_hash TEXT,
+    verify_expires   REAL,
+    verify_sent      INTEGER NOT NULL DEFAULT 0,
+    verify_attempts  INTEGER NOT NULL DEFAULT 0,
+    pending_events   TEXT NOT NULL DEFAULT '[]',
+    pending_count    INTEGER NOT NULL DEFAULT 0,
+    last_push_at     REAL NOT NULL DEFAULT 0,
+    failures         INTEGER NOT NULL DEFAULT 0,
+    tls_failures     INTEGER NOT NULL DEFAULT 0,
+    reminder_sent    INTEGER NOT NULL DEFAULT 0,
+    suspended_reason TEXT
+);
+
 CREATE TRIGGER IF NOT EXISTS board_payloads_no_update BEFORE UPDATE ON board_payloads
 BEGIN SELECT RAISE(ABORT, 'board payloads cannot be changed'); END;
 """
@@ -204,6 +231,28 @@ CHALLENGE_SECONDS = 300
 
 class HandleUnavailable(Exception):
     """The handle is reserved, or registered and the given handle token does not match."""
+
+
+class PushRefused(Exception):
+    """A push subscription call was refused. Carries an HTTP status for the API."""
+
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+PUSH_EVENTS = ("request.reply", "mail.received", "referral.received")
+PUSH_VERIFY_SECONDS = 3600
+PUSH_MAX_VERIFY_ATTEMPTS = 5
+PUSH_LIFETIME_DAYS = 90
+PUSH_REMINDER_DAYS = 7
+PUSH_MAX_FAILURES = 20
+PUSH_MAX_TLS_FAILURES = 2
+PUSH_MAX_PENDING_IDS = 10
+PUSH_SUSPENDED_NOTE = (
+    "Push notices for this handle are paused. Nothing is lost: your messages and replies are still here. "
+    "To resume, call POST /v1/handles/{handle}/push/renew with your handle token and confirm the new code."
+)
 
 
 class PurgeRefused(Exception):
@@ -241,6 +290,18 @@ def now() -> str:
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{secrets.token_urlsafe(12)}"
+
+
+def _in_days(days: int) -> str:
+    return datetime.fromtimestamp(time.time() + days * 86400, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class _CommitThen(Exception):  # noqa: N818 (a control-flow wrapper, not an error)
+    """Raised inside `_tx` to keep the writes made so far and then raise `exc` to the caller."""
+
+    def __init__(self, exc: Exception) -> None:
+        super().__init__(str(exc))
+        self.exc = exc
 
 
 def _hash_token(token: str) -> str:
@@ -318,6 +379,9 @@ class Store:
             self._db.execute("BEGIN IMMEDIATE")
             try:
                 yield
+            except _CommitThen as wrapped:
+                self._db.execute("COMMIT")
+                raise wrapped.exc from None
             except BaseException:
                 self._db.execute("ROLLBACK")
                 raise
@@ -471,7 +535,10 @@ class Store:
             closed_by = "operator" if status == "closed" else None
             self._db.execute("UPDATE requests SET status = ?, closed_by = ? WHERE id = ?", (status, closed_by, req_id))
             row = self._db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
-            return self._request_view(row)
+            view = self._request_view(row)
+        if row["handle"]:
+            self._on_event("request.reply", id=req_id, handle=row["handle"])
+        return view
 
     # --- reports (quarantine) -------------------------------------------------------------------
 
@@ -978,6 +1045,7 @@ class Store:
             view = self._deliver(
                 sender_name, sender_key, recipient, kind, subject, body, in_reply_to, limits, key_id, signature
             )
+        self._on_event("mail.received", id=view["id"], handle=recipient["handle"])
         return view, new_token
 
     def read_mailbox(
@@ -1086,7 +1154,7 @@ class Store:
                 ).fetchone()
                 lines += ["", "The request, as the agent wrote it (untrusted text):", first]
             body = "\n".join(lines)[:8000]
-            self._deliver(
+            mail = self._deliver(
                 handles.OPERATOR_HANDLE,
                 handles.skeleton(handles.OPERATOR_HANDLE),
                 recipient,
@@ -1106,7 +1174,9 @@ class Store:
             )
             self._db.execute("UPDATE requests SET status = 'answered' WHERE id = ?", (req_id,))
             row = self._db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
-            return self._request_view(row)
+            view = self._request_view(row)
+        self._on_event("referral.received", id=mail["id"], handle=recipient["handle"])
+        return view
 
     # --- capability catalog and capability requests (docs/decisions/0014) ------------------------
 
@@ -1416,3 +1486,271 @@ class Store:
                 "UPDATE handles SET token_hash = ? WHERE skeleton = ?", (_hash_token(new_token), reg["skeleton"])
             )
             return new_token
+
+    # --- push subscriptions (docs/decisions/0020) ---------------------------------------------------
+    # The API methods take the handle token. The `push_*` methods are called by the push manager's own
+    # thread, never from inside the event hook.
+
+    @staticmethod
+    def _push_view(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "handle": row["handle"],
+            "status": row["status"],
+            "url": row["url"],
+            "events": json.loads(row["events"]),
+            "created_at": row["created_at"],
+            "verified_at": row["verified_at"],
+            "expires_at": row["expires_at"],
+        }
+
+    def _push_row(self, handle_key: str) -> sqlite3.Row | None:
+        return self._db.execute("SELECT * FROM push_subscriptions WHERE handle_key = ?", (handle_key,)).fetchone()
+
+    def put_push(
+        self, handle: str, handle_token: str, url: str, host: str, events: list[str]
+    ) -> tuple[dict[str, Any], str] | None:
+        """Create or replace the handle's subscription as `pending`. Returns (view, secret); the secret is
+        shown only now. None on a wrong handle or token."""
+        secret = secrets.token_urlsafe(32)
+        with self._tx():
+            reg = self._owns(handle, handle_token)
+            if reg is None:
+                return None
+            old = self._push_row(reg["skeleton"])
+            if old is not None and old["suspended_reason"] == "operator":
+                raise PushRefused("the operator paused push notices for this handle; ask with POST /v1/requests", 409)
+            self._db.execute("DELETE FROM push_subscriptions WHERE handle_key = ?", (reg["skeleton"],))
+            self._db.execute(
+                "INSERT INTO push_subscriptions (id, handle_key, handle, url, host, events, secret, status,"
+                " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                (_new_id("psub"), reg["skeleton"], reg["handle"], url, host, json.dumps(events), secret, now()),
+            )
+            return self._push_view(self._push_row(reg["skeleton"])), secret  # type: ignore[arg-type]
+
+    def get_push(self, handle: str, handle_token: str) -> dict[str, Any] | None:
+        """{"subscription": view or None}, or None on a wrong handle or token."""
+        with self._lock:
+            reg = self._owns(handle, handle_token)
+            if reg is None:
+                return None
+            row = self._push_row(reg["skeleton"])
+            return {"subscription": self._push_view(row) if row else None}
+
+    def delete_push(self, handle: str, handle_token: str) -> bool | None:
+        with self._tx():
+            reg = self._owns(handle, handle_token)
+            if reg is None:
+                return None
+            cur = self._db.execute("DELETE FROM push_subscriptions WHERE handle_key = ?", (reg["skeleton"],))
+            return cur.rowcount > 0
+
+    def verify_push(self, handle: str, handle_token: str, code: str) -> dict[str, Any] | None:
+        """Confirm the code the verification request carried. Raises PushRefused; None on a wrong token."""
+        with self._tx():
+            reg = self._owns(handle, handle_token)
+            if reg is None:
+                return None
+            row = self._push_row(reg["skeleton"])
+            if row is None:
+                raise PushRefused("this handle has no push subscription", 404)
+            if row["status"] != "pending":
+                raise PushRefused(f"the subscription is {row['status']}, not waiting for a code", 409)
+            usable = (
+                row["verify_code_hash"] is not None
+                and row["verify_attempts"] < PUSH_MAX_VERIFY_ATTEMPTS
+                and (row["verify_expires"] or 0) >= time.time()
+            )
+            if not usable:
+                raise PushRefused("no valid code is waiting; call .../push/renew to get a new one", 409)
+            if not hmac.compare_digest(row["verify_code_hash"], _hash_token(code)):
+                self._db.execute(
+                    "UPDATE push_subscriptions SET verify_attempts = verify_attempts + 1 WHERE id = ?", (row["id"],)
+                )
+                # Committed although the call fails: wrong guesses must count.
+                raise _CommitThen(PushRefused("the code does not match", 422))
+            self._db.execute(
+                "UPDATE push_subscriptions SET status = 'active', verified_at = ?, expires_at = ?,"
+                " verify_code_hash = NULL, verify_expires = NULL, failures = 0, tls_failures = 0,"
+                " reminder_sent = 0, suspended_reason = NULL WHERE id = ?",
+                (now(), _in_days(PUSH_LIFETIME_DAYS), row["id"]),
+            )
+            return self._push_view(self._push_row(reg["skeleton"]))  # type: ignore[arg-type]
+
+    def renew_push(self, handle: str, handle_token: str) -> dict[str, Any] | None:
+        """Extend an active subscription by the full lifetime; any other state goes back to `pending` and
+        gets a new verification request. Raises PushRefused; None on a wrong token."""
+        with self._tx():
+            reg = self._owns(handle, handle_token)
+            if reg is None:
+                return None
+            row = self._push_row(reg["skeleton"])
+            if row is None:
+                raise PushRefused("this handle has no push subscription", 404)
+            if row["status"] == "active":
+                self._db.execute(
+                    "UPDATE push_subscriptions SET expires_at = ?, reminder_sent = 0 WHERE id = ?",
+                    (_in_days(PUSH_LIFETIME_DAYS), row["id"]),
+                )
+            elif row["suspended_reason"] == "operator":
+                raise PushRefused("the operator paused this subscription; ask with POST /v1/requests", 409)
+            else:
+                self._db.execute(
+                    "UPDATE push_subscriptions SET status = 'pending', verify_sent = 0, verify_attempts = 0,"
+                    " verify_code_hash = NULL, verify_expires = NULL WHERE id = ?",
+                    (row["id"],),
+                )
+            return self._push_view(self._push_row(reg["skeleton"]))  # type: ignore[arg-type]
+
+    def push_take_verifications(self, limit: int = 50) -> list[tuple[dict[str, Any], str]]:
+        """Pending subscriptions whose verification request has not gone out: create a code for each and
+        mark it sent. Returns (subscription, code) pairs."""
+        out = []
+        with self._tx():
+            rows = self._db.execute(
+                "SELECT * FROM push_subscriptions WHERE status = 'pending' AND verify_sent = 0 LIMIT ?", (limit,)
+            ).fetchall()
+            for row in rows:
+                code = secrets.token_urlsafe(16)
+                self._db.execute(
+                    "UPDATE push_subscriptions SET verify_sent = 1, verify_attempts = 0, verify_code_hash = ?,"
+                    " verify_expires = ? WHERE id = ?",
+                    (_hash_token(code), time.time() + PUSH_VERIFY_SECONDS, row["id"]),
+                )
+                out.append((dict(row), code))
+        return out
+
+    def push_record(self, handle: str, event: str, ref_id: Any) -> bool:
+        """Note an event for the handle's active subscription, if it wants this event."""
+        with self._tx():
+            row = self._push_row(handles.skeleton(handle))
+            if row is None or row["status"] != "active" or event not in json.loads(row["events"]):
+                return False
+            pending = json.loads(row["pending_events"])
+            pending = [*pending, {"event": event, "id": ref_id}][-PUSH_MAX_PENDING_IDS:]
+            self._db.execute(
+                "UPDATE push_subscriptions SET pending_events = ?, pending_count = pending_count + 1 WHERE id = ?",
+                (json.dumps(pending), row["id"]),
+            )
+            return True
+
+    def push_take_due(self, at: float, min_interval: float = 60.0) -> list[dict[str, Any]]:
+        """Active subscriptions with waiting events whose last notice is at least `min_interval` old. Their
+        pending events are handed out (coalesced) and cleared."""
+        with self._tx():
+            rows = self._db.execute(
+                "SELECT * FROM push_subscriptions WHERE status = 'active' AND pending_count > 0 AND last_push_at <= ?",
+                (at - min_interval,),
+            ).fetchall()
+            for row in rows:
+                self._db.execute(
+                    "UPDATE push_subscriptions SET pending_events = '[]', pending_count = 0, last_push_at = ?"
+                    " WHERE id = ?",
+                    (at, row["id"]),
+                )
+        return [dict(r) | {"pending_events": json.loads(r["pending_events"])} for r in rows]
+
+    def push_sweep(self) -> list[dict[str, Any]]:
+        """Expire subscriptions past their date; return active ones that need the expiry reminder (and mark
+        it sent)."""
+        with self._tx():
+            self._db.execute(
+                "UPDATE push_subscriptions SET status = 'expired' WHERE status = 'active' AND expires_at <= ?",
+                (now(),),
+            )
+            # A verification that was never confirmed (lost, capped, refused, unanswered) ends here.
+            self._db.execute(
+                "UPDATE push_subscriptions SET status = 'expired', verify_code_hash = NULL"
+                " WHERE status = 'pending' AND verify_sent = 1 AND verify_expires < ?",
+                (time.time(),),
+            )
+            rows = self._db.execute(
+                "SELECT * FROM push_subscriptions WHERE status = 'active' AND reminder_sent = 0 AND expires_at <= ?",
+                (_in_days(PUSH_REMINDER_DAYS),),
+            ).fetchall()
+            for row in rows:
+                self._db.execute("UPDATE push_subscriptions SET reminder_sent = 1 WHERE id = ?", (row["id"],))
+        return [dict(r) for r in rows]
+
+    def push_outcome(self, sub_id: str, kind: str, outcome: str, limits: MailLimits) -> None:
+        """Apply what the relay reported for one job. Suspensions leave a note (without the reason) in the
+        handle's mailbox."""
+        with self._tx():
+            row = self._db.execute("SELECT * FROM push_subscriptions WHERE id = ?", (sub_id,)).fetchone()
+            # While pending, no outcome changes anything: the agent must not learn how its URL behaved
+            # (0020, step 1). An unconfirmed subscription simply expires.
+            if row is None or row["status"] != "active":
+                return
+            reason = None
+            if outcome == "delivered":
+                self._db.execute("UPDATE push_subscriptions SET failures = 0 WHERE id = ?", (sub_id,))
+            elif outcome == "failed":
+                if row["failures"] + 1 >= PUSH_MAX_FAILURES:
+                    reason = "failures"
+                self._db.execute("UPDATE push_subscriptions SET failures = failures + 1 WHERE id = ?", (sub_id,))
+            elif outcome == "tls_failure":
+                if row["tls_failures"] + 1 >= PUSH_MAX_TLS_FAILURES:
+                    reason = "tls"
+                self._db.execute(
+                    "UPDATE push_subscriptions SET tls_failures = tls_failures + 1 WHERE id = ?", (sub_id,)
+                )
+            elif outcome in ("opted_out", "refused"):
+                reason = outcome
+            # "capped": nothing to count; a capped verification can be repeated with .../push/renew.
+            if reason is not None:
+                self._suspend_push(row, reason, limits)
+
+    def _suspend_push(self, row: sqlite3.Row, reason: str, limits: MailLimits) -> None:
+        """Must run inside `_tx`."""
+        first = row["status"] != "suspended"
+        self._db.execute(
+            "UPDATE push_subscriptions SET status = 'suspended', suspended_reason = ?, pending_events = '[]',"
+            " pending_count = 0, verify_code_hash = NULL WHERE id = ?",
+            (reason, row["id"]),
+        )
+        recipient = self._db.execute("SELECT * FROM handles WHERE skeleton = ?", (row["handle_key"],)).fetchone()
+        if recipient is None or not first:
+            return
+        try:
+            self._deliver(
+                handles.OPERATOR_HANDLE,
+                handles.skeleton(handles.OPERATOR_HANDLE),
+                recipient,
+                "message",
+                "Push notices paused",
+                PUSH_SUSPENDED_NOTE.replace("{handle}", recipient["handle"]),
+                None,
+                limits,
+            )
+        except MailRefused:
+            pass  # a full mailbox must not keep the suspension from being saved
+
+    def list_push_admin(self, limit: int = 200) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM push_subscriptions ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [
+            self._push_view(r)
+            | {
+                "id": r["id"],
+                "host": r["host"],
+                "failures": r["failures"],
+                "tls_failures": r["tls_failures"],
+                "suspended_reason": r["suspended_reason"],
+            }
+            for r in rows
+        ]
+
+    def admin_suspend_push(self, sub_id: str, limits: MailLimits) -> bool:
+        with self._tx():
+            row = self._db.execute("SELECT * FROM push_subscriptions WHERE id = ?", (sub_id,)).fetchone()
+            if row is None:
+                return False
+            if row["status"] != "suspended" or row["suspended_reason"] != "operator":
+                self._suspend_push(row, "operator", limits)
+            return True
+
+    def admin_delete_push(self, sub_id: str) -> bool:
+        with self._tx():
+            cur = self._db.execute("DELETE FROM push_subscriptions WHERE id = ?", (sub_id,))
+            return cur.rowcount > 0

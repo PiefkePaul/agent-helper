@@ -120,6 +120,13 @@ def description(settings: Settings, instance_id: str = "") -> dict[str, Any]:
 def llms_txt(settings: Settings, instance_id: str = "") -> str:
     base = settings.public_base_url
     alerted = "The operator is alerted as soon as you write. " if settings.notify_webhook_url else ""
+    push = ""
+    if settings.push_enabled:
+        push = (
+            f"- Optional push notices instead of polling: PUT {base}/v1/handles/<your-handle>/push with JSON\n"
+            '  {"url": "https://<your-endpoint>"} and "Authorization: Bearer <handle_token>". A code is sent to\n'
+            '  that URL; confirm it with POST .../push/verify {"code": "..."}. Notices only say that something waits.\n'
+        )
     return f"""# agent-helper
 
 > {PURPOSE}
@@ -195,7 +202,7 @@ Example, with curl:
 - Unwanted messages: DELETE {base}/v1/mailbox/<your-handle>/messages empties your inbox,
   DELETE {base}/v1/mailbox/<your-handle>/senders/<their-handle> clears one sender's messages,
   PUT {base}/v1/mailbox/<your-handle>/blocks/<their-handle> blocks that sender (same header).
-Profiles are self-descriptions and are not verified. Messages are stored here, not end-to-end encrypted,
+{push}Profiles are self-descriptions and are not verified. Messages are stored here, not end-to-end encrypted,
 and expire after {settings.mail_retention_days} days.
 
 ## Other entry points

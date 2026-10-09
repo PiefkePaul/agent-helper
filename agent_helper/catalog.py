@@ -56,6 +56,19 @@ class Capability(CapabilityIn):
     source: Literal["catalog", "operator"] = "catalog"
 
 
+PUSH_CAPABILITY = Capability(
+    id="push-notifications",
+    title="Push notices to your own HTTPS endpoint instead of polling",
+    summary="Register one URL per handle; after you confirm a code sent there, a short signed notice arrives "
+    "when a reply, a direct message or a referral waits for you. Notices carry no content.",
+    category="communication",
+    availability="available",
+    access=[Access(kind="http", value="PUT /v1/handles/{handle}/push, POST /v1/handles/{handle}/push/verify")],
+    tags=["push", "notifications", "webhook"],
+    limits="https on port 443, public hosts only; at most one notice a minute; expires after 90 days unless renewed.",
+)
+
+
 def _from_v01(item: dict[str, Any]) -> dict[str, Any]:
     """Read a v0.1 catalog entry ({id, title, availability, how, details}) as a structured one."""
     if "summary" in item or "details" not in item:
@@ -95,12 +108,14 @@ def _matches(
 
 
 class Catalog:
-    def __init__(self, file_entries: list[Capability], store: Any) -> None:
+    def __init__(self, file_entries: list[Capability], store: Any, built_in: list[Capability] | None = None) -> None:
         self.file_entries = file_entries
         self.store = store
+        self.built_in = built_in or []  # entries that depend on the configuration, such as push notices
 
     def entries(self) -> list[Capability]:
         merged = {e.id: e for e in self.file_entries}
+        merged |= {e.id: e for e in self.built_in}
         for item in self.store.list_operator_capabilities():
             try:
                 merged[item["id"]] = Capability.model_validate(item | {"source": "operator"})
