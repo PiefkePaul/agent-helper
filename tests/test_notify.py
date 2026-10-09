@@ -371,8 +371,22 @@ def test_malformed_response_is_reported_without_retry():
 
     def garbage():
         conn, _ = server.accept()
-        conn.recv(65536)
+        conn.settimeout(5)
+        # Read the whole request first; closing with unread data makes Windows reset the connection,
+        # which the client would see as a network error instead of the garbage answer.
+        received = b""
+        while b"{}" not in received:
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            received += chunk
         conn.sendall(b"NOT HTTP AT ALL" + bytes([13, 10, 13, 10]))
+        conn.shutdown(socket.SHUT_WR)  # finish sending, then wait for the client to hang up
+        try:
+            while conn.recv(65536):
+                pass
+        except OSError:
+            pass
         conn.close()
 
     threading.Thread(target=garbage, daemon=True).start()
