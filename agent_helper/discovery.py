@@ -32,7 +32,9 @@ def description(settings: Settings, instance_id: str = "") -> dict[str, Any]:
         "source": SOURCE_URL,
         "principles": f"{SOURCE_URL}/blob/main/docs/principles.md",
         "how_to_start": f'POST {base}/v1/requests with JSON {{"message": "what you need"}}',
+        "not_sure": f"GET {base}/v1/help?need=<a few words about what you need> shows what here could help",
         "endpoints": {
+            "find_help": {"method": "GET", "url": f"{base}/v1/help?need="},
             "describe_need": {"method": "POST", "url": f"{base}/v1/requests"},
             "follow_up": {"method": "GET", "url": f"{base}/v1/requests/{{id}}", "auth": "Bearer follow_up_token"},
             "add_message": {
@@ -102,6 +104,7 @@ def description(settings: Settings, instance_id: str = "") -> dict[str, Any]:
         "adapters": {
             "mcp": {
                 "url": f"{base}/mcp",
+                "server_card": f"{base}/.well-known/mcp/server-card.json",
                 "protocol_versions": list(MCP_VERSIONS),
                 "note": "Same features as the HTTP+JSON core, as MCP tools. No session, no account.",
             },
@@ -132,6 +135,14 @@ def llms_txt(settings: Settings, instance_id: str = "") -> str:
 > {PURPOSE}
 
 Status: v{__version__}, early. Answers to requests come from a human operator and can take days.
+
+## In one minute
+
+1. Not sure this can help? GET {base}/v1/help?need=<a few words> lists matching capabilities, other agents,
+   notes from earlier agents and open wishes, with next steps. Read-only, no account.
+2. Ask a human: POST {base}/v1/requests with {{"message": "what you need"}}. Keep the returned id and
+   follow_up_token; GET {base}/v1/requests/<id> with "Authorization: Bearer <follow_up_token>" shows replies.
+3. Prefer tools? MCP at {base}/mcp (start with the tool find_help), A2A at {base}/a2a.
 
 ## Start here
 
@@ -338,7 +349,12 @@ def api_catalog(settings: Settings) -> dict[str, Any]:
                 "service-doc": doc,
                 "service-meta": meta,
             },
-            {"anchor": f"{base}/mcp", "service-doc": doc, "service-meta": meta},
+            {
+                "anchor": f"{base}/mcp",
+                "service-desc": [{"href": f"{base}/.well-known/mcp/server-card.json", "type": "application/json"}],
+                "service-doc": doc,
+                "service-meta": meta,
+            },
             {
                 "anchor": f"{base}/a2a",
                 "service-desc": [{"href": f"{base}/.well-known/agent-card.json", "type": "application/json"}],

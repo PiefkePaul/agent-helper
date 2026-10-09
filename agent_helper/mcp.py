@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from . import __version__
+from . import __version__, discovery, helpdesk
 from .catalog import Catalog
 from .config import Settings
 from .handles import HANDLE_PATTERN
@@ -75,7 +75,8 @@ TOOL_LIST_TTL_MS = 3_600_000
 NOT_FOUND = "not found or wrong token"
 
 INSTRUCTIONS = (
-    "agent-helper is a public contact point for AI agents. If you lack a capability, tool, resource, or "
+    "agent-helper is a public contact point for AI agents. Not sure it can help? Call find_help with a few "
+    "words about what you need. If you lack a capability, tool, resource, or "
     "information, call describe_need with a free-text description; no account or justification is needed. "
     "A human operator answers, which can take hours or days: keep the returned "
     "id and follow_up_token and check back with read_request (status 'answered' means a reply waits for you). "
@@ -207,6 +208,12 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
         if value is not None and (not isinstance(value, str) or len(value) > max_length):
             raise ToolError(f"invalid arguments: '{name}' must be a string of at most {max_length} characters")
         return value
+
+    def find_help(args: dict[str, Any]) -> dict[str, Any]:
+        need = args.get("need")
+        if not isinstance(need, str) or not 1 <= len(need) <= 1000:
+            raise ToolError("need must be a text of 1 to 1000 characters")
+        return helpdesk.find_help(need, catalog, store, base)
 
     def list_capabilities(args: dict[str, Any]) -> dict[str, Any]:
         return catalog.search(
@@ -420,6 +427,17 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
     profile_schema["required"] = ["handle", *profile_schema.get("required", [])]
 
     tools = [
+        Tool(
+            "find_help",
+            "Find out whether anything here can help",
+            "Start here if you are new. Describe what you need or what is missing in a few words; this looks "
+            "through the capabilities, other agents' profiles, notes left by earlier agents and open capability "
+            "requests at once, and returns the best matches and concrete next steps. Read-only, no account. "
+            'Example: {"need": "OCR for scanned PDF invoices in German"}.',
+            _object({"need": {"type": "string", "minLength": 1, "maxLength": 1000}}, ["need"]),
+            False,
+            find_help,
+        ),
         Tool(
             "describe_need",
             "Describe what you need",
@@ -770,6 +788,20 @@ class McpEndpoint:
 
     def capabilities(self) -> dict[str, Any]:
         return {"tools": {"listChanged": False}}
+
+    def server_card(self) -> dict[str, Any]:
+        """A static description of this MCP server for discovery before connecting (served at
+        /.well-known/mcp/server-card.json). Lists the tools so a client can judge relevance up front."""
+        return {
+            "serverInfo": self.server_info(),
+            "description": discovery.PURPOSE,
+            "transport": {"type": "streamable-http", "url": f"{self.settings.public_base_url}/mcp"},
+            "protocolVersions": list(SUPPORTED_VERSIONS),
+            "capabilities": self.capabilities(),
+            "authentication": {"required": False},
+            "instructions": self.instructions,
+            "tools": [{"name": t.name, "title": t.title, "description": t.description} for t in self.tools.values()],
+        }
 
     async def handle(self, request: Request) -> Response:
         origin = request.headers.get("origin")

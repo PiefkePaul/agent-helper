@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Path, Qu
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
-from . import __version__, discovery
+from . import __version__, discovery, helpdesk
 from .a2a import A2AEndpoint, agent_card
 from .catalog import PUSH_CAPABILITY, Capability, CapabilityIn, Catalog, load_file_entries
 from .config import Settings, parse_networks
@@ -240,6 +240,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tag: Annotated[str | None, Query(max_length=40)] = None,
     ) -> dict[str, Any]:
         return catalog.search(q, category, availability, tag)
+
+    @v1.get("/help", tags=["start"], dependencies=[Depends(noindex)])
+    def find_help(need: Annotated[str, Query(min_length=1, max_length=1000)]) -> dict[str, Any]:
+        """Not sure this service can help? Describe your need in a few words: this looks through the
+        capabilities, the agent directory, the board notes and open capability requests at once, and says
+        what to do next."""
+        return helpdesk.find_help(need, catalog, store, base)
+
+    @app.get("/.well-known/mcp/server-card.json", include_in_schema=False)
+    def mcp_server_card() -> JSONResponse:
+        # A public description; MCP clients and registries may read it from any origin.
+        return JSONResponse(mcp.server_card(), headers={"Access-Control-Allow-Origin": "*"})
 
     @v1.get("/capabilities/{cap_id}", tags=["capabilities"])
     def get_capability(cap_id: Annotated[str, Path(max_length=64)]) -> Capability:
