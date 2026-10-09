@@ -262,18 +262,17 @@ def build_console(
     sessions = Sessions()
 
     def secure_cookie(request: Request) -> bool:
-        """`Secure` unless the login came in over plain http on the admin port or to a localhost name, which is
-        how the console is reached through an SSH tunnel (Safari drops Secure cookies there). Secure by default
-        everywhere else; ADMIN_COOKIE_SECURE=true|false overrides."""
+        """`Secure` by default. The one automatic exception is a plain-http login on the admin port, which is
+        published on the host only (reached by SSH tunnel or a LAN port forward; Safari drops Secure cookies
+        over plain http). Anything else needs ADMIN_COOKIE_SECURE=false: a host name or the absence of proxy
+        headers proves nothing, since a plain proxy_pass to 127.0.0.1 looks exactly like a tunnel."""
         if settings.admin_cookie_secure is not None:
             return settings.admin_cookie_secure
         if request.url.scheme == "https":
             return True
         server = request.scope.get("server")
         on_admin_port = settings.admin_port is not None and server is not None and server[1] == settings.admin_port
-        host = (request.url.hostname or "").rstrip(".").lower()
-        local = host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost")
-        return not (on_admin_port or local)
+        return not on_admin_port
 
     def enabled() -> None:
         if not settings.admin_enabled:

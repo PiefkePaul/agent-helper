@@ -19,9 +19,10 @@ browser.
    dependencies. Without a valid `ADMIN_AUTH_SECRET` it answers `404`, like the admin API.
 2. **Login and sessions.** The operator logs in with the admin secret. A session is a random token in a
    cookie (`HttpOnly`, `SameSite=Strict`, `Path=/admin`, and `Secure` by default). `Secure` is left off
-   only for a plain-http login on the admin port or to a `localhost` name, which is how the console is
-   reached through an SSH tunnel: Safari drops `Secure` cookies there, and the tunnel provides the
-   transport security. `ADMIN_COOKIE_SECURE=true|false` overrides. Valid
+   automatically only for a plain-http login on the admin port, which is published on the host only and
+   reached by SSH tunnel or a LAN port forward (Safari drops `Secure` cookies over plain http). A host
+   name or missing proxy headers prove nothing, since a plain proxy to 127.0.0.1 looks the same, so any
+   other plain-http use needs `ADMIN_COOKIE_SECURE=false` explicitly (`true` forces `Secure`). Valid
    for 12 hours and kept in memory only, so a restart logs everyone out. At most 20 sessions exist at a
    time. Failed logins are rate-limited like any write and slowed down.
 3. **CSRF.** Every form after login carries a per-session token that must match, on top of
