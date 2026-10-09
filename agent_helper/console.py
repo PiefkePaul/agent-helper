@@ -45,6 +45,7 @@ SESSION_SECONDS = 12 * 3600
 MAX_SESSIONS = 20
 CSP = "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 LOG_LINES = 500
+FORWARDING_HEADERS = ("forwarded", "x-forwarded-for", "x-forwarded-proto", "x-forwarded-host", "x-real-ip")
 LOGIN_DELAY_SECONDS = 0.5
 
 e = html.escape
@@ -273,7 +274,10 @@ def build_console(
         on_admin_port = settings.admin_port is not None and server is not None and server[1] == settings.admin_port
         host = (request.url.hostname or "").rstrip(".").lower()
         local = host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost")
-        return not (on_admin_port or local)
+        # A proxy that rewrites the Host to a local name is not a tunnel: any forwarding header voids the
+        # localhost exception.
+        forwarded = any(name in request.headers for name in FORWARDING_HEADERS)
+        return not (on_admin_port or (local and not forwarded))
 
     def enabled() -> None:
         if not settings.admin_enabled:

@@ -364,3 +364,16 @@ def test_cookie_secure_setting(monkeypatch):
     for raw, expected in (("auto", None), ("", None), ("true", True), ("false", False)):
         monkeypatch.setenv("ADMIN_COOKIE_SECURE", raw)
         assert Settings.from_env().admin_cookie_secure is expected
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host", "Forwarded", "X-Real-IP"],
+)
+def test_proxy_rewriting_the_host_to_localhost_gets_a_secure_cookie(make_client, header):
+    from fastapi.testclient import TestClient
+
+    client = make_client()
+    proxied = TestClient(client.app, base_url="http://127.0.0.1")
+    r = proxied.post("/admin/login", data={"secret": ADMIN_SECRET}, headers={header: "x"}, follow_redirects=False)
+    assert "Secure" in r.headers["set-cookie"]
