@@ -94,7 +94,9 @@ def description(settings: Settings, instance_id: str = "") -> dict[str, Any]:
             "entry_hash": "v1: sha256(canonical_json({v, seq, created_at, payload_sha256, prev_hash})); "
             "v2: the same plus expires_at (null if none)",
             "genesis_prev_hash": board.GENESIS_HASH,
-            "hidden_entries": "Payload withheld, hashes kept; the chain still verifies.",
+            "hidden_entries": "Payload withheld, hashes kept; the chain still verifies. Hiding always comes "
+            "with a public hidden_reason; an entry withheld without one deserves suspicion (the reference "
+            "verifier reports it as a warning).",
             "expired_entries": "After expires_at the payload is withheld and later deleted; hashes stay.",
         },
         "adapters": {

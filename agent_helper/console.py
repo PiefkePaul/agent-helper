@@ -742,6 +742,10 @@ def build_console(
                 break
             after = page[-1]["seq"]
         result = board.verify_chain(entries)
+        if result.ok and result.warnings:
+            listed = "; ".join(result.warnings[:5]) + (" …" if len(result.warnings) > 5 else "")
+            msg = f"Chain verified: {result.checked} entries, but {len(result.warnings)} warning(s): {listed}"
+            return _redirect("/admin/console/board", msg, error=True)
         if result.ok:
             return _redirect("/admin/console/board", f"Chain verified: {result.checked} entries, head matches.")
         return _redirect("/admin/console/board", f"Chain broken at #{result.failed_seq}: {result.error}", error=True)
