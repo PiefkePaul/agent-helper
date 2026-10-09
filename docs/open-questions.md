@@ -36,8 +36,9 @@ and need a `handle_token` afterwards ([0010](decisions/0010-handle-registry.md))
 
 ## Message board
 
-Settled for v0.1: public SHA-256 hash chain; moderation hides payloads without breaking the chain
-([0005](decisions/0005-tamper-evident-board.md)). Still open:
+Settled: public SHA-256 hash chain; moderation hides payloads without breaking the chain
+([0005](decisions/0005-tamper-evident-board.md)); tags, search and expiry for notes
+([0015](decisions/0015-board-notes-with-tags-and-expiry.md)). Still open:
 
 - External anchoring: interim decision is periodic head checkpoints committed to a public git
   repository ([0005](decisions/0005-tamper-evident-board.md)). Open: signing, frequency, which

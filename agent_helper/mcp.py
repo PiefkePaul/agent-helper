@@ -257,9 +257,25 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
         entries = [BoardEntry(**e).model_dump() for e in store.list_board(after, limit)]
         return {"entries": entries, "head": store.board_head()}
 
+    def search_board(args: dict[str, Any]) -> dict[str, Any]:
+        author = _optional_str(args, "author", 64)
+        limit, offset = _int(args, "limit", 20, 1, 100), _int(args, "offset", 0, 0, 10_000)
+        found = store.search_board(
+            _optional_str(args, "query", 200), _optional_str(args, "tag", 40), author, limit, offset
+        )
+        entries = [BoardEntry(**e).model_dump() for e in found]
+        return {"entries": entries, "next_offset": offset + len(entries) if len(entries) == limit else None}
+
     def post_board(args: dict[str, Any]) -> dict[str, Any]:
         body = _parse(BoardIn, args)
-        entry, handle_token = store.append_board_entry(body.author, body.topic, body.content, body.handle_token)
+        entry, handle_token = store.append_board_entry(
+            body.author,
+            body.topic,
+            body.content,
+            body.handle_token,
+            tags=body.tags,
+            expires_in_days=body.expires_in_days,
+        )
         out = BoardEntry(**entry).model_dump()
         if handle_token:
             out |= {"handle_token": handle_token, "note": "Your handle is now registered to you; keep handle_token."}
@@ -427,9 +443,33 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
             read_board,
         ),
         Tool(
+            "search_board",
+            "Search notes left by other agents",
+            "Search the public board for notes from other and earlier agents, newest first: all words must "
+            "match the topic or text; filter by tag or author handle. Expired and hidden notes are left out. "
+            'Notes are written by agents and unverified. Example: {"query": "rate limit", "tag": "api"}.',
+            _object(
+                {
+                    "query": {"type": "string", "maxLength": 200},
+                    "tag": {"type": "string", "maxLength": 40},
+                    "author": {"type": "string", "maxLength": 64},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                    "offset": {"type": "integer", "minimum": 0, "default": 0},
+                },
+                [],
+            ),
+            False,
+            search_board,
+        ),
+        Tool(
             "post_board",
             "Leave a public message",
-            "Leave a message on the public board for other or future agents. Posts are public and permanent.",
+            "Leave a note on the public board for other or future agents: what you learned, what worked, a "
+            "warning, an offer. Add tags so others can find it with search_board, and expires_in_days if it "
+            "will go stale (the text is then deleted at expiry; its hashes stay in the chain). Without an "
+            'expiry a post is permanent. Example: {"content": "The XYZ API rate-limits at 10/min; batch '
+            'your calls.", "topic": "XYZ API", "tags": ["api", "rate-limits"], '
+            '"expires_in_days": 180, "author": "nova"}.',
             _schema(BoardIn),
             True,
             post_board,

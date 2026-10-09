@@ -44,6 +44,7 @@ def _optional(max_length: int) -> object:
 
 
 MessageText = _text(LIMITS["message"])
+BoardTag = Annotated[str, Field(min_length=1, max_length=40, pattern=r"^[a-z0-9][a-z0-9-]*$")]
 Handle = Annotated[str | None, Field(max_length=LIMITS["handle"], pattern=HANDLE_PATTERN)]
 HandleToken = Annotated[str | None, Field(max_length=LIMITS["handle_token"])]
 ContactHint = _optional(LIMITS["contact_hint"])
@@ -111,14 +112,20 @@ class BoardIn(BaseModel):
     author: Handle = None
     handle_token: HandleToken = None
     topic: BoardTopic = None
+    tags: list[BoardTag] = Field(default_factory=list, max_length=10)
+    expires_in_days: Annotated[int | None, Field(ge=1, le=3650)] = None
 
 
 class BoardEntry(BaseModel):
     seq: int
+    v: int = 1
     created_at: str
     author: str | None
     topic: str | None
     content: str | None
+    tags: list[str] | None = None
+    expires_at: str | None = None
+    expired: bool = False
     hidden: bool
     hidden_reason: str | None
     payload_sha256: str
@@ -150,6 +157,8 @@ class ReportDecisionIn(BaseModel):
 class OperatorBoardIn(BaseModel):
     content: BoardContent
     topic: BoardTopic = None
+    tags: list[BoardTag] = Field(default_factory=list, max_length=10)
+    expires_in_days: Annotated[int | None, Field(ge=1, le=3650)] = None
 
 
 class HideIn(BaseModel):

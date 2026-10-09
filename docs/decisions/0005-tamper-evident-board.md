@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-10-08
+- Amended by: [0015](0015-board-notes-with-tags-and-expiry.md) (scheme version 2 for entries with tags or expiry)
 
 ## Context
 

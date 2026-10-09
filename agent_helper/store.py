@@ -71,6 +71,11 @@ CREATE TABLE IF NOT EXISTS board_hidden (
     hidden_at TEXT NOT NULL,
     reason    TEXT NOT NULL
 );
+-- Entries whose payload was deleted at its expiry (docs/decisions/0015). The chain row stays.
+CREATE TABLE IF NOT EXISTS board_expired (
+    seq        INTEGER PRIMARY KEY REFERENCES board_chain (seq),
+    expires_at TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS board_chain_no_update BEFORE UPDATE ON board_chain
 BEGIN SELECT RAISE(ABORT, 'board_chain is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS board_chain_no_delete BEFORE DELETE ON board_chain
@@ -205,6 +210,20 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after v0.1 to an existing database. Adding a column changes no row."""
+        added = {
+            "board_chain": [("v", "INTEGER NOT NULL DEFAULT 1")],
+            "board_payloads": [("tags", "TEXT"), ("expires_at", "TEXT")],
+        }
+        for table, columns in added.items():
+            present = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
+            for name, decl in columns:
+                if name not in present:
+                    self._db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+        self._db.execute("CREATE INDEX IF NOT EXISTS board_by_expiry ON board_payloads (expires_at)")
 
     @contextmanager
     def _tx(self) -> Iterator[None]:
@@ -389,56 +408,118 @@ class Store:
         handle_token: str | None = None,
         *,
         as_operator: bool = False,
+        tags: list[str] | None = None,
+        expires_in_days: int | None = None,
     ) -> tuple[dict[str, Any], str | None]:
-        """Append an entry. Returns the entry and a new handle token if `author` was registered just now."""
+        """Append an entry. Returns the entry and a new handle token if `author` was registered just now.
+
+        Entries with tags or an expiry use hashing scheme version 2; plain entries stay version 1, so
+        verifiers written for version 1 keep working on them.
+        """
         with self._tx():
             new_handle_token = None if as_operator else self._claim_handle(author, handle_token)
+            self._purge_expired_board_payloads()
             head = self._db.execute("SELECT seq, entry_hash FROM board_chain ORDER BY seq DESC LIMIT 1").fetchone()
             seq = head["seq"] + 1 if head else 1
             prev = head["entry_hash"] if head else board.GENESIS_HASH
             ts = now()
-            p_hash = board.payload_hash(author, topic, content)
-            e_hash = board.entry_hash(seq, ts, p_hash, prev)
+            expires_at = None
+            if expires_in_days is not None:
+                expires_at = datetime.fromtimestamp(time.time() + expires_in_days * 86400, UTC).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+            v = 2 if tags or expires_at else 1
+            p_hash = board.payload_hash(author, topic, content, tags, expires_at, v)
+            e_hash = board.entry_hash(seq, ts, p_hash, prev, v)
             self._db.execute(
-                "INSERT INTO board_chain (seq, created_at, payload_sha256, prev_hash, entry_hash)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (seq, ts, p_hash, prev, e_hash),
+                "INSERT INTO board_chain (seq, created_at, payload_sha256, prev_hash, entry_hash, v)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (seq, ts, p_hash, prev, e_hash, v),
             )
             self._db.execute(
-                "INSERT INTO board_payloads (seq, author, topic, content) VALUES (?, ?, ?, ?)",
-                (seq, author, topic, content),
+                "INSERT INTO board_payloads (seq, author, topic, content, tags, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (seq, author, topic, content, json.dumps(tags) if v == 2 else None, expires_at),
             )
             entry = self._board_entries(only_seq=seq)[0]
         if not as_operator:
             self._on_event("board.posted", seq=seq, handle=author, preview=content)
         return entry, new_handle_token
 
+    _BOARD_SELECT = (
+        "SELECT c.seq, c.v, c.created_at, c.payload_sha256, c.prev_hash, c.entry_hash,"
+        " p.author, p.topic, p.content, p.tags, p.expires_at, h.reason AS hidden_reason, x.expires_at AS expired_at"
+        " FROM board_chain c LEFT JOIN board_payloads p ON p.seq = c.seq"
+        " LEFT JOIN board_hidden h ON h.seq = c.seq"
+        " LEFT JOIN board_expired x ON x.seq = c.seq"
+    )
+
     def _board_entries(self, after: int = 0, only_seq: int | None = None, limit: int = -1) -> list[dict[str, Any]]:
         rows = self._db.execute(
-            "SELECT c.seq, c.created_at, c.payload_sha256, c.prev_hash, c.entry_hash,"
-            " p.author, p.topic, p.content, h.reason AS hidden_reason"
-            " FROM board_chain c LEFT JOIN board_payloads p ON p.seq = c.seq"
-            " LEFT JOIN board_hidden h ON h.seq = c.seq"
-            " WHERE c.seq > ? AND (? IS NULL OR c.seq = ?) ORDER BY c.seq LIMIT ?",
+            f"{self._BOARD_SELECT} WHERE c.seq > ? AND (? IS NULL OR c.seq = ?) ORDER BY c.seq LIMIT ?",  # noqa: S608
             (after, only_seq, only_seq, limit),
         ).fetchall()
-        out = []
-        for r in rows:
-            hidden = r["hidden_reason"] is not None or r["content"] is None
-            entry = {
-                "seq": r["seq"],
-                "created_at": r["created_at"],
-                "author": None if hidden else r["author"],
-                "topic": None if hidden else r["topic"],
-                "content": None if hidden else r["content"],
-                "hidden": hidden,
-                "hidden_reason": r["hidden_reason"],
-                "payload_sha256": r["payload_sha256"],
-                "prev_hash": r["prev_hash"],
-                "entry_hash": r["entry_hash"],
-            }
-            out.append(entry)
-        return out
+        return [self._board_view(r) for r in rows]
+
+    @staticmethod
+    def _board_view(r: sqlite3.Row) -> dict[str, Any]:
+        expires_at = r["expires_at"] or r["expired_at"]
+        expired = r["expired_at"] is not None or (expires_at is not None and expires_at <= now())
+        hidden = r["hidden_reason"] is not None or (r["content"] is None and not expired)
+        withheld = hidden or expired
+        return {
+            "seq": r["seq"],
+            "v": r["v"],
+            "created_at": r["created_at"],
+            "author": None if withheld else r["author"],
+            "topic": None if withheld else r["topic"],
+            "content": None if withheld else r["content"],
+            "tags": None if withheld or r["tags"] is None else json.loads(r["tags"]),
+            # The expiry is part of the hashed payload, but it is also kept after the payload is purged,
+            # so anyone can see why the content is gone.
+            "expires_at": expires_at,
+            "expired": expired,
+            "hidden": hidden,
+            "hidden_reason": r["hidden_reason"],
+            "payload_sha256": r["payload_sha256"],
+            "prev_hash": r["prev_hash"],
+            "entry_hash": r["entry_hash"],
+        }
+
+    def _purge_expired_board_payloads(self) -> None:
+        """Delete payloads past their expiry; the chain row and hashes stay. Must run inside `_tx`."""
+        ts = now()
+        self._db.execute(
+            "INSERT OR IGNORE INTO board_expired (seq, expires_at)"
+            " SELECT seq, expires_at FROM board_payloads WHERE expires_at IS NOT NULL AND expires_at <= ?",
+            (ts,),
+        )
+        self._db.execute("DELETE FROM board_payloads WHERE expires_at IS NOT NULL AND expires_at <= ?", (ts,))
+
+    def search_board(
+        self, query: str | None, tag: str | None, author: str | None, limit: int, offset: int
+    ) -> list[dict[str, Any]]:
+        """Visible, unexpired entries, newest first, matching all words, a tag and an author."""
+        where = [
+            "h.seq IS NULL",
+            "x.seq IS NULL",
+            "p.content IS NOT NULL",
+            "(p.expires_at IS NULL OR p.expires_at > ?)",
+        ]
+        params: list[Any] = [now()]
+        for term in (query or "").lower().split()[:8]:
+            escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            where.append("lower(coalesce(p.topic, '') || ' ' || p.content) LIKE ? ESCAPE '\\'")
+            params.append(f"%{escaped}%")
+        if tag:
+            where.append("EXISTS (SELECT 1 FROM json_each(coalesce(p.tags, '[]')) WHERE value = ?)")
+            params.append(tag)
+        if author:
+            where.append("p.author = ?")
+            params.append(author)
+        sql = f"{self._BOARD_SELECT} WHERE {' AND '.join(where)} ORDER BY c.seq DESC LIMIT ? OFFSET ?"  # noqa: S608
+        with self._lock:
+            rows = self._db.execute(sql, (*params, limit, offset)).fetchall()
+            return [self._board_view(r) for r in rows]
 
     def list_board(self, after: int, limit: int) -> list[dict[str, Any]]:
         with self._lock:

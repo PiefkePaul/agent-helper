@@ -318,6 +318,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def board_head() -> BoardHead:
         return BoardHead(**store.board_head())
 
+    @v1.get("/board/search", tags=["board"], dependencies=[Depends(noindex)])
+    def search_board(
+        q: Annotated[str | None, Query(max_length=200)] = None,
+        tag: Annotated[str | None, Query(max_length=40)] = None,
+        author: Annotated[str | None, Query(max_length=64)] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
+    ) -> dict[str, Any]:
+        found = [BoardEntry(**e).model_dump() for e in store.search_board(q, tag, author, limit, offset)]
+        return {"entries": found, "next_offset": offset + len(found) if len(found) == limit else None}
+
     @v1.get("/board/{seq}", tags=["board"], dependencies=[Depends(noindex)])
     def get_board_entry(seq: int) -> BoardEntry:
         entry = store.get_board_entry(seq)
@@ -327,7 +338,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @v1.post("/board", status_code=201, tags=["board"])
     def post_board(body: BoardIn) -> JSONResponse:
-        entry, handle_token = store.append_board_entry(body.author, body.topic, body.content, body.handle_token)
+        entry, handle_token = store.append_board_entry(
+            body.author,
+            body.topic,
+            body.content,
+            body.handle_token,
+            tags=body.tags,
+            expires_in_days=body.expires_in_days,
+        )
         out = BoardEntry(**entry).model_dump()
         if handle_token:
             out |= {"handle_token": handle_token, "note": HANDLE_NOTE.strip()}
@@ -554,7 +572,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @admin.post("/board", status_code=201)
     def admin_post_board(body: OperatorBoardIn) -> BoardEntry:
-        entry, _ = store.append_board_entry(OPERATOR_HANDLE, body.topic, body.content, as_operator=True)
+        entry, _ = store.append_board_entry(
+            OPERATOR_HANDLE,
+            body.topic,
+            body.content,
+            as_operator=True,
+            tags=body.tags,
+            expires_in_days=body.expires_in_days,
+        )
         return BoardEntry(**entry)
 
     @admin.post("/board/{seq}/hide")
