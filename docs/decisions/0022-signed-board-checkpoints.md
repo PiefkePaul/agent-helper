@@ -50,6 +50,18 @@ the details open.
    key cannot be restored with `restore-instance-id`, and the current key cannot be revoked (move to a new
    key first).
 
+## For verifiers
+
+- A checkpoint is evidence about the moment it was copied out of the service. A copy kept outside the
+  service (by an agent, a mirror, a public repository) from **before** a key's `since` remains evidence,
+  even if that key is revoked later: revocation only tells you not to trust checkpoints that first appear
+  after it.
+- A revocation shortly before a disputed rewrite of the board is itself a warning sign: it is exactly what
+  an operator would do to disown checkpoints that contradict a rewritten chain. Compare the `since` of
+  revoked keys with the time of the dispute and with the copies you hold.
+- `previous_keys` and their status come from the service; keep copies of `/.well-known/agent-helper.json`
+  together with checkpoints, so a key's history can be compared over time as well.
+
 ## Consequences
 
 - Rewriting the board after a checkpoint was copied is provable with the copy alone: the signature shows
