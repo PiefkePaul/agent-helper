@@ -202,3 +202,13 @@ def test_agent_close_notifies_the_operator(make_client):
     rpc(client, "CancelTask", {"id": task["id"]}, token=task["metadata"]["followUpToken"])
     assert client.app.state.notifier.flush()
     assert events == ["request.created", "request.closed"]
+
+
+def test_refused_handles_do_not_spend_the_write_budget(make_client):
+    client = make_client(write_per_minute=2, global_write_per_minute=100)
+    start(client, metadata={"handle": "nova"})  # one write
+    for handle in ("operator", "n0va"):  # reserved, taken
+        for _ in range(3):
+            r = rpc(client, "SendMessage", user_message("x", metadata={"handle": handle}))
+            assert r.json()["error"]["code"] == -32602
+    assert "task" in rpc(client, "SendMessage", user_message("second write")).json()["result"]

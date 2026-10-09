@@ -310,6 +310,7 @@ class A2AEndpoint:
         except ValidationError as exc:
             problems = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors())
             raise A2AError(INVALID_PARAMS, f"invalid message: {problems}") from None
+        self.store.check_handle(body_in.handle, body_in.handle_token)  # refuse before charging the budget
         self._charge_write(request)
         req_id, follow_up_token, handle_token = self.store.create_request(
             body_in.message, body_in.handle, body_in.contact_hint, body_in.handle_token
