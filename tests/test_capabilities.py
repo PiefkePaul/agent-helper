@@ -2,8 +2,6 @@ import json
 
 import pytest
 
-from tests.test_notify import WEBHOOK, Recorder
-
 
 def test_catalog_entries_are_structured(client):
     body = client.get("/v1/capabilities").json()
@@ -123,12 +121,19 @@ def test_capability_request_validation(client, body):
 
 
 def test_capability_request_notifies_operator(make_client):
-    client = make_client(notify_webhook_url=WEBHOOK)
-    rec = Recorder()
-    client.app.state.notifier.transport = rec
+    from agent_helper.notify import Delivery
+
+    events = []
+
+    def record(url, body, headers):
+        events.append(json.loads(body)["event"])
+        return Delivery(ok=True, status=200)
+
+    client = make_client(notify_webhook_url="https://hooks.example.invalid/x")
+    client.app.state.notifier.transport = record
     _ask(client)
     assert client.app.state.notifier.flush()
-    assert rec.events[0]["event"] == "capability.requested"
+    assert events == ["capability.requested"]
 
 
 def test_decision_changes_only_sent_fields_and_never_unhides(client, admin_headers):
