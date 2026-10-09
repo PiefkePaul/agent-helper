@@ -44,6 +44,7 @@ from .models import (
     RequestOut,
     RequestStatus,
     VoteIn,
+    next_offset,
 )
 from .notify import Notifier
 from .store import ConversationFull, HandleUnavailable, MailLimits, MailRefused, Store
@@ -222,7 +223,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         found = store.search_capability_requests(q, tag, status, sort, limit, offset)
         items = [CapabilityRequestOut(**r).model_dump() for r in found]
-        return {"requests": items, "next_offset": offset + len(items) if len(items) == limit else None}
+        return {"requests": items, "next_offset": next_offset(offset, len(items), limit)}
 
     @v1.get("/capability-requests/{req_id}", tags=["capabilities"], dependencies=[Depends(noindex)])
     def get_capability_request(req_id: Annotated[str, Path(max_length=64)]) -> CapabilityRequestOut:
@@ -318,6 +319,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def board_head() -> BoardHead:
         return BoardHead(**store.board_head())
 
+    @v1.get("/board/search", tags=["board"], dependencies=[Depends(noindex)])
+    def search_board(
+        q: Annotated[str | None, Query(max_length=200)] = None,
+        tag: Annotated[str | None, Query(max_length=40)] = None,
+        author: Annotated[str | None, Query(max_length=64)] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
+    ) -> dict[str, Any]:
+        found = [BoardEntry(**e).model_dump() for e in store.search_board(q, tag, author, limit, offset)]
+        return {"entries": found, "next_offset": next_offset(offset, len(found), limit)}
+
     @v1.get("/board/{seq}", tags=["board"], dependencies=[Depends(noindex)])
     def get_board_entry(seq: int) -> BoardEntry:
         entry = store.get_board_entry(seq)
@@ -327,7 +339,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @v1.post("/board", status_code=201, tags=["board"])
     def post_board(body: BoardIn) -> JSONResponse:
-        entry, handle_token = store.append_board_entry(body.author, body.topic, body.content, body.handle_token)
+        entry, handle_token = store.append_board_entry(
+            body.author,
+            body.topic,
+            body.content,
+            body.handle_token,
+            tags=body.tags,
+            expires_in_days=body.expires_in_days,
+        )
         out = BoardEntry(**entry).model_dump()
         if handle_token:
             out |= {"handle_token": handle_token, "note": HANDLE_NOTE.strip()}
@@ -356,7 +375,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
     ) -> dict[str, Any]:
         found = [ProfileOut(**p).model_dump() for p in store.search_profiles(q, tag, limit, offset)]
-        return {"profiles": found, "next_offset": offset + len(found) if len(found) == limit else None}
+        return {"profiles": found, "next_offset": next_offset(offset, len(found), limit)}
 
     @v1.get("/directory/{handle}", tags=["directory"], dependencies=[Depends(noindex)])
     def get_profile(handle: HandlePath) -> ProfileOut:
@@ -554,7 +573,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @admin.post("/board", status_code=201)
     def admin_post_board(body: OperatorBoardIn) -> BoardEntry:
-        entry, _ = store.append_board_entry(OPERATOR_HANDLE, body.topic, body.content, as_operator=True)
+        entry, _ = store.append_board_entry(
+            OPERATOR_HANDLE,
+            body.topic,
+            body.content,
+            as_operator=True,
+            tags=body.tags,
+            expires_in_days=body.expires_in_days,
+        )
         return BoardEntry(**entry)
 
     @admin.post("/board/{seq}/hide")
