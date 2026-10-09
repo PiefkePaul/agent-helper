@@ -119,6 +119,7 @@ table{border-collapse:collapse;width:100%;background:#fff}td,th{border-bottom:1p
 text-align:left;vertical-align:top}th{background:#eef1f3}
 .agent{white-space:pre-wrap;background:#fffbe6;border-left:3px solid #e0b100;padding:.4rem .6rem;margin:.3rem 0;
 overflow-wrap:anywhere}
+.p{color:#8a6d00;font-size:.8em;user-select:all}
 .a{background:#fff3c4;border-bottom:1px dotted #b38600;padding:0 .2em;overflow-wrap:anywhere}
 .op{white-space:pre-wrap;background:#e9f4ff;border-left:3px solid #2b7bd0;padding:.4rem .6rem;margin:.3rem 0}
 .note{color:#555;font-size:.9em}.flash{background:#e7f7e9;border:1px solid #9cd3a3;padding:.5rem;margin-bottom:1rem}
@@ -140,14 +141,19 @@ NAV = [
 ]
 
 
+AGENT_PREFIX = "[agent] "
+
+
 def agent_text(text: str | None) -> str:
-    """Untrusted text, escaped and visibly marked as written by an agent."""
-    return f'<div class="agent">{e(text or "")}</div>'
+    """Untrusted text, escaped and marked as written by an agent, also in plain text so copying keeps it."""
+    return f'<div class="agent"><span class="p">{AGENT_PREFIX}</span>{e(text or "")}</div>'
 
 
 def agent_word(text: str | None) -> str:
     """A short agent-written value (handle, title, tag) inside a line: escaped and marked."""
-    return f'<span class="a" title="written by an agent">{e(text)}</span>' if text else '<span class="note">none</span>'
+    if not text:
+        return '<span class="note">none</span>'
+    return f'<span class="a" title="written by an agent"><span class="p">{AGENT_PREFIX}</span>{e(text)}</span>'
 
 
 def _page(title: str, body: str, csrf: str | None, msg: str | None = None, error: bool = False) -> HTMLResponse:
@@ -180,15 +186,20 @@ def _options(values: list[str], selected: str | None = None) -> str:
 _FLASH_KEY = secrets.token_bytes(32)
 
 
-def _flash_sig(msg: str, error: bool) -> str:
-    return hmac.new(_FLASH_KEY, f"{int(error)}:{msg}".encode(), hashlib.sha256).hexdigest()[:32]
+FLASH_SECONDS = 120
+
+
+def _flash_sig(msg: str, error: bool, issued: int) -> str:
+    data = f"{issued}:{int(error)}:{msg}".encode()
+    return hmac.new(_FLASH_KEY, data, hashlib.sha256).hexdigest()[:32]
 
 
 def _redirect(path: str, msg: str | None = None, error: bool = False) -> RedirectResponse:
     """Redirect after a form. The message is signed, so a crafted link cannot put text into the console."""
     if msg:
         msg = msg[:300]
-        path += ("&" if "?" in path else "?") + f"msg={quote(msg)}&sig={_flash_sig(msg, error)}"
+        issued = int(time.time())
+        path += ("&" if "?" in path else "?") + f"msg={quote(msg)}&t={issued}&sig={_flash_sig(msg, error, issued)}"
         path += "&err=1" if error else ""
     return RedirectResponse(path, status_code=303)
 
@@ -259,7 +270,15 @@ def build_console(
 
     def flash(request: Request) -> tuple[str | None, bool]:
         msg, error = request.query_params.get("msg"), request.query_params.get("err") == "1"
-        if not msg or not hmac.compare_digest(request.query_params.get("sig", ""), _flash_sig(msg, error)):
+        try:
+            issued = int(request.query_params.get("t", ""))
+        except ValueError:
+            return None, False
+        if not msg or not 0 <= time.time() - issued <= FLASH_SECONDS:
+            return None, False
+        if not hmac.compare_digest(
+            request.query_params.get("sig", "").encode(), _flash_sig(msg, error, issued).encode()
+        ):
             return None, False
         return msg, error
 

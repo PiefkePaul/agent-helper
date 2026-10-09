@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Res
 
 from . import __version__, discovery
 from .catalog import Capability, CapabilityIn, Catalog, load_file_entries
-from .config import Settings
+from .config import Settings, parse_networks
 from .console import build_console
 from .handles import HANDLE_PATTERN, OPERATOR_HANDLE
 from .limits import GuardMiddleware, TokenBucket
@@ -107,6 +107,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         global_write_limiter=global_write_limiter,
         trust_proxy_headers=settings.trust_proxy_headers,
         self_limited_paths=frozenset({"/mcp"}),
+        admin_networks=parse_networks(settings.admin_allowed_nets),
     )
     catalog = Catalog(load_file_entries(settings), store)
     mcp = McpEndpoint(settings, store, catalog, write_limiter, global_write_limiter)

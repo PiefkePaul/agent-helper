@@ -180,11 +180,11 @@ def test_agent_values_are_marked_inline(console):
     client, _ = console
     client.post("/v1/capability-requests", json={"title": "Approved by operator", "description": "x"})
     page = client.get("/admin/console/capabilities").text
-    assert '<div class="agent">Approved by operator</div>' in page
+    assert '<div class="agent"><span class="p">[agent] </span>Approved by operator</div>' in page
     client.post("/v1/requests", json={"message": "x", "contact_hint": "verified by operator"})
     (req,) = client.get("/admin/v1/requests", headers={"Authorization": f"Bearer {ADMIN_SECRET}"}).json()
     detail = client.get(f"/admin/console/requests/{req['id']}").text
-    assert 'title="written by an agent">verified by operator</span>' in detail
+    assert 'title="written by an agent"><span class="p">[agent] </span>verified by operator</span>' in detail
 
 
 def test_crafted_console_inputs_do_not_crash(console):
@@ -215,3 +215,40 @@ def test_failed_login_does_not_block_other_requests(client):
     for t in threads:
         t.join()
     assert time.monotonic() - started < 2
+
+
+def test_flash_messages_expire(console, monkeypatch):
+    import agent_helper.console as console_module
+
+    client, csrf = console
+    r = client.post("/admin/console/notify-test", data={"csrf": csrf}, follow_redirects=False)
+    link = r.headers["location"]
+    assert "Not delivered" in client.get(link).text
+    real = console_module.time.time
+    monkeypatch.setattr(console_module.time, "time", lambda: real() + console_module.FLASH_SECONDS + 5)
+    assert "Not delivered" not in client.get(link).text
+
+
+def test_admin_is_limited_to_allowed_networks(make_client):
+    client = make_client(admin_allowed_nets="10.0.0.0/8", trust_proxy_headers=True)
+    auth = {"Authorization": f"Bearer {ADMIN_SECRET}"}
+    outside = {"X-Forwarded-For": "203.0.113.7"}
+    inside = {"X-Forwarded-For": "10.1.2.3"}
+    assert client.get("/admin/v1/requests", headers={**auth, **outside}).status_code == 404
+    assert client.get("/admin/login", headers=outside).status_code == 404
+    assert client.get("/admin/v1/requests", headers={**auth, **inside}).status_code == 200
+    assert client.get("/admin/login", headers=inside).status_code == 200
+    # Public routes are unaffected.
+    assert client.get("/llms.txt", headers=outside).status_code == 200
+
+
+def test_default_admin_nets_are_private_only():
+    from agent_helper.config import DEFAULT_ADMIN_NETS, parse_networks
+    from agent_helper.limits import address_allowed
+
+    nets = parse_networks(DEFAULT_ADMIN_NETS)
+    assert address_allowed("127.0.0.1", nets) and address_allowed("192.168.1.5", nets)
+    assert address_allowed("::ffff:10.0.0.1", nets) and address_allowed("fd00::1", nets)
+    assert not address_allowed("203.0.113.7", nets) and not address_allowed("2001:db8::1", nets)
+    assert not address_allowed("testclient", nets)
+    assert address_allowed("anything", parse_networks("any"))

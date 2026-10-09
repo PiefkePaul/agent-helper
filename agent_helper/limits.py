@@ -76,16 +76,34 @@ def _address_key(raw: str) -> str:
     return str(addr)
 
 
-def client_key(scope: Scope, trust_proxy_headers: bool) -> str:
+def client_address(scope: Scope, trust_proxy_headers: bool) -> str:
+    """The client's address as seen by the nearest trusted proxy, or the socket peer."""
     if trust_proxy_headers:
         for name, value in scope.get("headers", []):
             if name == b"x-forwarded-for":
                 # The nearest trusted proxy appends the address it saw as the last element.
                 last = value.decode("latin-1").split(",")[-1].strip()
                 if last:
-                    return _address_key(last)
+                    return last
     client = scope.get("client")
-    return _address_key(client[0]) if client else "unknown"
+    return client[0] if client else "unknown"
+
+
+def client_key(scope: Scope, trust_proxy_headers: bool) -> str:
+    return _address_key(client_address(scope, trust_proxy_headers))
+
+
+def address_allowed(raw: str, networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] | None) -> bool:
+    """Whether `raw` lies in one of `networks`. None means every client is allowed."""
+    if networks is None:
+        return True
+    try:
+        addr = ipaddress.ip_address(raw)
+    except ValueError:
+        return False
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return any(addr in net for net in networks if addr.version == net.version)
 
 
 def _loggable(path: str, max_length: int = 200) -> str:
@@ -113,7 +131,9 @@ class GuardMiddleware:
         trust_proxy_headers: bool,
         global_write_limiter: TokenBucket | None = None,
         self_limited_paths: frozenset[str] = frozenset(),
+        admin_networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] | None = None,
     ) -> None:
+        self.admin_networks = admin_networks
         self.app = app
         self.max_body_bytes = max_body_bytes
         self.read_limiter = read_limiter
@@ -136,6 +156,16 @@ class GuardMiddleware:
         def done() -> None:
             ms = (time.monotonic() - started) * 1000
             log.info("%s %s %s %.0fms", method, _loggable(scope["path"]), status_holder["status"], ms)
+
+        path = scope["path"]
+        if (path == "/admin" or path.startswith("/admin/")) and not address_allowed(
+            client_address(scope, self.trust_proxy_headers), self.admin_networks
+        ):
+            # The admin API and console do not exist for clients outside ADMIN_ALLOWED_NETS.
+            status_holder["status"] = 404
+            await _send_json(send, 404, {"detail": "Not Found"}, [])
+            done()
+            return
 
         is_read = method in READ_METHODS or scope["path"] in self.self_limited_paths
         limiter = self.read_limiter if is_read else self.write_limiter

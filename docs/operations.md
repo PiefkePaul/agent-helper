@@ -38,8 +38,9 @@ proxy overwrites `X-Forwarded-For`.
 Open `/admin/login` in a browser and log in with `ADMIN_AUTH_SECRET`
 ([decision 0016](decisions/0016-operator-web-console.md)). The console shows open requests, reports,
 capability requests, the directory, the board (with chain verification) and the recent log, and has forms
-to reply, refer, decide, hide and post. Sessions last 12 hours and end on restart. Keep `/admin/`
-restricted at the reverse proxy (tunnel or VPN, ideally with a second factor).
+to reply, refer, decide, hide and post. Sessions last 12 hours and end on restart. The app answers
+`/admin/` only for clients in `ADMIN_ALLOWED_NETS` (default: loopback and private networks); keep it
+restricted at the reverse proxy as well (tunnel or VPN, ideally with a second factor).
 
 The same actions are available as a JSON API under `/admin/v1/` with
 `Authorization: Bearer <ADMIN_AUTH_SECRET>`:

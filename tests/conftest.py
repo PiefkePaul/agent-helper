@@ -22,6 +22,7 @@ def make_client(tmp_path) -> Iterator[Callable[..., TestClient]]:
             write_per_minute=1000,
             read_per_minute=1000,
             global_write_per_minute=1000,
+            admin_allowed_nets="any",  # the test client has no IP address
         )
         settings = dataclasses.replace(settings, **overrides)
         client = TestClient(create_app(settings))
