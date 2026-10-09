@@ -10,12 +10,13 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 from . import __version__, discovery
 from .config import Settings
 from .handles import OPERATOR_HANDLE
 from .limits import GuardMiddleware, TokenBucket
+from .mcp import McpEndpoint
 from .models import (
     BoardEntry,
     BoardHead,
@@ -70,14 +71,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redoc_url=None,
         lifespan=lifespan,
     )
+    write_limiter = TokenBucket(settings.write_per_minute)
+    global_write_limiter = TokenBucket(settings.global_write_per_minute)
     app.add_middleware(
         GuardMiddleware,
         max_body_bytes=settings.max_body_bytes,
         read_limiter=TokenBucket(settings.read_per_minute),
-        write_limiter=TokenBucket(settings.write_per_minute),
-        global_write_limiter=TokenBucket(settings.global_write_per_minute),
+        write_limiter=write_limiter,
+        global_write_limiter=global_write_limiter,
         trust_proxy_headers=settings.trust_proxy_headers,
+        self_limited_paths=frozenset({"/mcp"}),
     )
+    mcp = McpEndpoint(settings, store, capabilities, write_limiter, global_write_limiter)
 
     @app.exception_handler(HandleUnavailable)
     async def handle_unavailable(_: Request, exc: HandleUnavailable) -> JSONResponse:
@@ -94,10 +99,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # --- discovery ------------------------------------------------------------------------------
 
-    @app.get("/", response_class=PlainTextResponse, include_in_schema=False)
-    @app.get("/llms.txt", response_class=PlainTextResponse, include_in_schema=False)
-    def llms() -> str:
-        return discovery.llms_txt(settings)
+    link_header = {"Link": discovery.links(settings)}
+
+    @app.get("/", include_in_schema=False)
+    def root(request: Request) -> Response:
+        # Browsers and search engines ask for HTML; agents and plain HTTP clients get the plain text.
+        headers = {**link_header, "Vary": "Accept"}
+        if "text/html" in request.headers.get("accept", ""):
+            return HTMLResponse(discovery.html_page(settings), headers=headers)
+        return PlainTextResponse(discovery.llms_txt(settings), headers=headers)
+
+    @app.get("/llms.txt", include_in_schema=False)
+    def llms() -> PlainTextResponse:
+        return PlainTextResponse(discovery.llms_txt(settings), headers=link_header)
+
+    @app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
+    def robots() -> str:
+        return discovery.robots_txt(settings)
+
+    @app.get("/sitemap.xml", include_in_schema=False)
+    def sitemap() -> Response:
+        return Response(discovery.sitemap_xml(settings), media_type="application/xml")
+
+    @app.get("/.well-known/api-catalog", include_in_schema=False)
+    def api_catalog() -> Response:
+        return JSONResponse(
+            discovery.api_catalog(settings),
+            media_type='application/linkset+json; profile="https://www.rfc-editor.org/info/rfc9727"',
+        )
+
+    @app.post("/mcp", include_in_schema=False)
+    async def mcp_endpoint(request: Request) -> Response:
+        return await mcp.handle(request)
+
+    @app.api_route("/mcp", methods=["GET", "DELETE"], include_in_schema=False)
+    def mcp_no_stream() -> Response:
+        # This endpoint offers no standalone SSE stream and no sessions (MCP 2026-07-28, legacy compatible).
+        return Response(status_code=405, headers={"Allow": "POST"})
 
     @app.get("/.well-known/agent-helper.json", tags=["discovery"])
     def well_known() -> dict[str, Any]:
@@ -173,17 +211,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # --- board ----------------------------------------------------------------------------------
 
-    @v1.get("/board", tags=["board"])
+    def noindex(response: Response) -> None:
+        # Board content is written by anyone; keep it out of search indexes so it cannot borrow this domain.
+        response.headers["X-Robots-Tag"] = "noindex, nofollow"
+
+    @v1.get("/board", tags=["board"], dependencies=[Depends(noindex)])
     def list_board(
         after: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=200)] = 50
     ) -> list[BoardEntry]:
         return [BoardEntry(**e) for e in store.list_board(after, limit)]
 
-    @v1.get("/board/head", tags=["board"])
+    @v1.get("/board/head", tags=["board"], dependencies=[Depends(noindex)])
     def board_head() -> BoardHead:
         return BoardHead(**store.board_head())
 
-    @v1.get("/board/{seq}", tags=["board"])
+    @v1.get("/board/{seq}", tags=["board"], dependencies=[Depends(noindex)])
     def get_board_entry(seq: int) -> BoardEntry:
         entry = store.get_board_entry(seq)
         if entry is None:

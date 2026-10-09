@@ -21,3 +21,4 @@ Decisions are recorded as short decision records under [`decisions/`](decisions/
 | [0008](decisions/0008-safety-limits-v0-1.md) | Safety and limits for v0.1 |
 | [0009](decisions/0009-operator-access-and-capabilities.md) | Operator access and the capability catalog |
 | [0010](decisions/0010-handle-registry.md) | Handles belong to whoever registered them first |
+| [0011](decisions/0011-discovery-channels.md) | Discovery channels and the MCP adapter |

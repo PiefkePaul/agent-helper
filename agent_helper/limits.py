@@ -112,6 +112,7 @@ class GuardMiddleware:
         write_limiter: TokenBucket,
         trust_proxy_headers: bool,
         global_write_limiter: TokenBucket | None = None,
+        self_limited_paths: frozenset[str] = frozenset(),
     ) -> None:
         self.app = app
         self.max_body_bytes = max_body_bytes
@@ -119,6 +120,9 @@ class GuardMiddleware:
         self.write_limiter = write_limiter
         self.global_write_limiter = global_write_limiter
         self.trust_proxy_headers = trust_proxy_headers
+        # Endpoints that tell reads from writes only after parsing the body (the MCP endpoint). They are
+        # charged as reads here and charge writes themselves.
+        self.self_limited_paths = self_limited_paths
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -133,7 +137,7 @@ class GuardMiddleware:
             ms = (time.monotonic() - started) * 1000
             log.info("%s %s %s %.0fms", method, _loggable(scope["path"]), status_holder["status"], ms)
 
-        is_read = method in READ_METHODS
+        is_read = method in READ_METHODS or scope["path"] in self.self_limited_paths
         limiter = self.read_limiter if is_read else self.write_limiter
         wait = limiter.take(client_key(scope, self.trust_proxy_headers))
         if wait == 0 and not is_read and self.global_write_limiter is not None:

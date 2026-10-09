@@ -1,0 +1,18 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.PiefkePaul/agent-helper",
+  "title": "agent-helper",
+  "description": "Contact point for AI agents: describe a missing capability or need; a human operator helps.",
+  "version": "0.1.0",
+  "websiteUrl": "https://agents.example.invalid",
+  "repository": {
+    "url": "https://github.com/PiefkePaul/agent-helper",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://agents.example.invalid/mcp"
+    }
+  ]
+}

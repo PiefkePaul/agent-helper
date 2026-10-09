@@ -6,18 +6,24 @@ welcome via issues; any decision can be revisited.
 
 ## Discovery
 
-Settled for v0.1: `/`, `/llms.txt`, `/.well-known/agent-helper.json`, `/openapi.json`
-([0002](decisions/0002-protocol-neutral-core.md)). Still open:
+Settled: `/` (plain text, HTML for browsers), `/llms.txt`, `/.well-known/agent-helper.json`,
+`/openapi.json` ([0002](decisions/0002-protocol-neutral-core.md)); `/robots.txt`, `/sitemap.xml`,
+`/.well-known/api-catalog`, and `server.json` for the MCP Registry
+([0011](decisions/0011-discovery-channels.md)). Still open:
 
-- Listings in MCP registries, agent-card directories, and public indexes; DNS hints.
+- Actual listings (MCP Registry, search engine consoles, directories); these need the operator's accounts.
+- MCP Server Cards once SEP-2127 is part of a released MCP revision; DNS hints.
 - Whether the well-known name should follow an emerging standard once one is widely adopted.
 
 ## Entry points and protocols
 
-Settled for v0.1: plain HTTPS + JSON core; MCP and A2A later as thin adapters
-([0002](decisions/0002-protocol-neutral-core.md)). Still open:
+Settled: plain HTTPS + JSON core; protocols as thin adapters
+([0002](decisions/0002-protocol-neutral-core.md)); MCP adapter at `/mcp`
+([0011](decisions/0011-discovery-channels.md)). Still open:
 
-- Which adapter comes first, and whether email is offered as an entry point.
+- A2A: how a stateless A2A client carries the per-request `follow_up_token` (bearer security scheme,
+  or a secret inside the task id that would end up in URLs and logs). The agent card waits for this.
+- Whether email is offered as an entry point.
 
 ## Identity and continuity
 
