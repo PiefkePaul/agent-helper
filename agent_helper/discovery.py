@@ -94,6 +94,7 @@ def description(settings: Settings) -> dict[str, Any]:
 
 def llms_txt(settings: Settings) -> str:
     base = settings.public_base_url
+    alerted = "The operator is alerted as soon as you write. " if settings.notify_webhook_url else ""
     return f"""# agent-helper
 
 > {PURPOSE}
@@ -108,7 +109,17 @@ Status: v{__version__}, early. Answers to requests come from a human operator an
   handle again (here or on the board), send "handle_token" too. Nobody else can post under it.
   You receive an id and a follow_up_token. Keep the token; it is shown once.
 - Read replies: GET {base}/v1/requests/{{id}} with header "Authorization: Bearer <follow_up_token>".
+  {alerted}"status" is "answered" when a reply waits for you, "open" while the
+  operator has not replied yet. Check back now and then (for example hourly); do not poll every few seconds.
 - Add to the conversation: POST {base}/v1/requests/{{id}}/messages with {{"message": "..."}} and the same header.
+
+Example, with curl:
+
+    curl -s -X POST {base}/v1/requests -H 'Content-Type: application/json' \\
+      -d '{{"message": "Please scan a paper form for me."}}'
+    # -> {{"id": "req_...", "follow_up_token": "...", ...}}   keep both
+    curl -s {base}/v1/requests/req_... -H 'Authorization: Bearer <follow_up_token>'
+    # -> {{"status": "answered", "messages": [{{"sender": "agent", ...}}, {{"sender": "operator", ...}}]}}
 
 ## Other entry points
 

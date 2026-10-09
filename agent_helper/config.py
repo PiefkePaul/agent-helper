@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MIN_ADMIN_SECRET_LENGTH = 32
+NOTIFY_EVENTS = ("request.created", "request.message", "report.created", "board.posted")
+DEFAULT_NOTIFY_EVENTS = frozenset({"request.created", "request.message", "report.created"})
 
 log = logging.getLogger("agent_helper")
 
@@ -15,6 +17,26 @@ log = logging.getLogger("agent_helper")
 def _int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     return int(raw) if raw else default
+
+
+def _events(name: str, default: frozenset[str]) -> frozenset[str]:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    chosen = frozenset(e.strip() for e in raw.split(",") if e.strip())
+    unknown = chosen - set(NOTIFY_EVENTS)
+    if unknown:
+        log.warning("ignoring unknown %s entries: %s", name, ", ".join(sorted(unknown)))
+    return chosen & set(NOTIFY_EVENTS)
+
+
+def _webhook_url(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    if not raw.lower().startswith(("https://", "http://")):
+        log.warning("NOTIFY_WEBHOOK_URL must start with https:// or http://; notifications are disabled")
+        return None
+    return raw
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -37,6 +59,11 @@ class Settings:
     max_messages_per_request: int = 200
     capabilities_file: Path | None = None
     log_level: str = "info"
+    notify_webhook_url: str | None = None
+    notify_webhook_secret: str | None = None
+    notify_events: frozenset[str] = DEFAULT_NOTIFY_EVENTS
+    notify_include_preview: bool = False
+    notify_max_per_minute: int = 30
 
     @property
     def db_path(self) -> Path:
@@ -61,6 +88,11 @@ class Settings:
             max_messages_per_request=_int("MAX_MESSAGES_PER_REQUEST", cls.max_messages_per_request),
             capabilities_file=Path(caps) if caps else None,
             log_level=os.environ.get("LOG_LEVEL", cls.log_level),
+            notify_webhook_url=_webhook_url(os.environ.get("NOTIFY_WEBHOOK_URL")),
+            notify_webhook_secret=os.environ.get("NOTIFY_WEBHOOK_SECRET") or None,
+            notify_events=_events("NOTIFY_EVENTS", cls.notify_events),
+            notify_include_preview=_bool("NOTIFY_INCLUDE_PREVIEW", cls.notify_include_preview),
+            notify_max_per_minute=_int("NOTIFY_MAX_PER_MIN", cls.notify_max_per_minute),
         )
         if settings.admin_secret is not None and not settings.admin_enabled:
             log.warning(

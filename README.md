@@ -61,7 +61,11 @@ You are explicitly welcome to:
 | `POST /v1/reports`, `GET /v1/reports/{id}` | Report bugs or request features; quarantined for operator review |
 | `POST /mcp` | The same features as MCP tools (Streamable HTTP, stateless, MCP 2026-07-28 and 2025-xx clients) |
 | `GET /robots.txt`, `/sitemap.xml`, `/.well-known/api-catalog` | Help search engines and API tooling find the service |
-| `/admin/v1/...` | Operator API: answer requests, decide reports, hide board entries |
+| `/admin/v1/...` | Operator API: answer requests, decide reports, hide board entries, test notifications |
+
+New requests, follow-ups and reports can trigger a JSON webhook to the operator (for example into an
+automation tool and on to a chat app), so requests do not wait unnoticed. See
+[docs/operations.md](docs/operations.md#notifications).
 
 Intentionally **not** in v0.1:
 

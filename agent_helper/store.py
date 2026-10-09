@@ -7,7 +7,7 @@ import hmac
 import secrets
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -97,10 +97,22 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-class Store:
-    """Thread-safe wrapper around one SQLite connection. One writer at a time is enough for v0.1."""
+EventHook = Callable[..., None]
 
-    def __init__(self, path: Path) -> None:
+
+def _no_events(event: str, **fields: Any) -> None:
+    return None
+
+
+class Store:
+    """Thread-safe wrapper around one SQLite connection. One writer at a time is enough for v0.1.
+
+    `on_event(name, **fields)` is called after a write by an agent has been committed, outside the lock
+    (used for operator notifications, docs/decisions/0012). It must not block or raise.
+    """
+
+    def __init__(self, path: Path, on_event: EventHook = _no_events) -> None:
+        self._on_event = on_event
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
@@ -171,6 +183,7 @@ class Store:
                 "INSERT INTO request_messages (request_id, sender, created_at, body) VALUES (?, 'agent', ?, ?)",
                 (req_id, ts, message),
             )
+        self._on_event("request.created", id=req_id, handle=handle, preview=message)
         return req_id, token, new_handle_token
 
     def _request_view(self, row: sqlite3.Row) -> dict[str, Any]:
@@ -208,7 +221,14 @@ class Store:
             )
             self._db.execute("UPDATE requests SET status = 'open' WHERE id = ?", (req_id,))
             row = self._db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
-            return self._request_view(row)
+            view = self._request_view(row)
+        self._on_event("request.message", id=req_id, handle=view["handle"], preview=body)
+        return view
+
+    def get_request_admin(self, req_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
+            return self._request_view(row) if row else None
 
     def list_requests(self, status: str | None, limit: int) -> list[dict[str, Any]]:
         with self._lock:
@@ -242,6 +262,7 @@ class Store:
                 "INSERT INTO reports (id, token_hash, created_at, kind, body) VALUES (?, ?, ?, ?, ?)",
                 (rep_id, _hash_token(token), now(), kind, body),
             )
+        self._on_event("report.created", id=rep_id, kind=kind, preview=body)
         return rep_id, token
 
     @staticmethod
@@ -302,7 +323,10 @@ class Store:
                 "INSERT INTO board_payloads (seq, author, topic, content) VALUES (?, ?, ?, ?)",
                 (seq, author, topic, content),
             )
-            return self._board_entries(only_seq=seq)[0], new_handle_token
+            entry = self._board_entries(only_seq=seq)[0]
+        if not as_operator:
+            self._on_event("board.posted", seq=seq, handle=author, preview=content)
+        return entry, new_handle_token
 
     def _board_entries(self, after: int = 0, only_seq: int | None = None, limit: int = -1) -> list[dict[str, Any]]:
         rows = self._db.execute(

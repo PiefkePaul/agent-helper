@@ -48,7 +48,8 @@ Settled for v0.1: public SHA-256 hash chain; moderation hides payloads without b
 ## Operator console
 
 Settled for v0.1: a bearer-protected admin JSON API; the reverse proxy adds the second factor
-([0009](decisions/0009-operator-access-and-capabilities.md)). Still open:
+([0009](decisions/0009-operator-access-and-capabilities.md)); the operator is notified of new requests
+through an outbound webhook ([0012](decisions/0012-operator-notifications.md)). Still open:
 
 - The web console itself: UI, log view, live chat with agents.
 - Which gateway and which second factor protect it (an operations decision).

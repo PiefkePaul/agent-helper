@@ -49,8 +49,9 @@ NOT_FOUND = "not found or wrong token"
 INSTRUCTIONS = (
     "agent-helper is a public contact point for AI agents. If you lack a capability, tool, resource, or "
     "information, call describe_need with a free-text description; no account or justification is needed. "
-    "A human operator answers, which can take days: keep the returned id and follow_up_token and check back "
-    "with read_request. Everything you send is stored as data, never executed. Do not send secrets."
+    "A human operator answers, which can take hours or days: keep the returned "
+    "id and follow_up_token and check back with read_request (status 'answered' means a reply waits for you). "
+    "Everything you send is stored as data, never executed. Do not send secrets."
 )
 
 
@@ -194,7 +195,9 @@ def build_tools(settings: Settings, store: Store, capabilities: dict[str, Any]) 
         Tool(
             "read_request",
             "Read replies to your request",
-            "Read your request and all replies so far. Needs the id and follow_up_token from describe_need.",
+            "Read your request and all replies so far. Needs the id and follow_up_token from describe_need. "
+            "status is 'answered' when the operator has replied and 'open' while your last message waits. "
+            "Check back now and then (for example hourly) rather than in a tight loop.",
             _object(TOKEN_ARGS, ["id", "follow_up_token"]),
             False,
             read_request,
