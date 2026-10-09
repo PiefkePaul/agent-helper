@@ -5,7 +5,9 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -94,6 +96,36 @@ def _push_mode(raw: str | None) -> str:
     return mode
 
 
+def _key_ids(raw: str) -> tuple[tuple[str, str | None], ...]:
+    """Comma-separated key ids (16 hex digits), each optionally with the time it counts as revoked from:
+    `id@2026-10-09T12:00:00Z`. A malformed entry stops the start: a typo must not leave a key trusted that
+    the operator meant to revoke."""
+    out = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        kid, _, since = part.partition("@")
+        kid = kid.strip().lower()
+        valid = len(kid) == 16 and all(c in "0123456789abcdef" for c in kid)
+        since = since.strip()
+        if since:
+            # Exactly one form: ASCII digits and an upper-case Z (strptime alone would also take a "z").
+            try:
+                if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", since):
+                    raise ValueError
+                since = datetime.strptime(since, "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                valid = False
+        if not valid:
+            raise SystemExit(
+                "REVOKED_KEY_IDS must list key ids of 16 hex digits, each optionally @YYYY-MM-DDTHH:MM:SSZ; "
+                f"not valid: {part[:40]!r}"
+            )
+        out.append((kid, since or None))
+    return tuple(out)
+
+
 def parse_networks(raw: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] | None:
     """Comma-separated CIDRs; "any" means every client (None). One invalid entry makes the whole list empty,
     which denies everyone: a typo must not open access."""
@@ -163,6 +195,7 @@ class Settings:
     notify_max_per_minute: int = 30
     board_checkpoint_seconds: int = 3600
     instance_signing_key_file: Path | None = None
+    revoked_key_ids: tuple[tuple[str, str | None], ...] = ()
     help_board_window: int = 2000
     push_mode: str = "off"
     push_allowed_domains: str = ""
@@ -217,6 +250,7 @@ class Settings:
             notify_include_preview=_bool("NOTIFY_INCLUDE_PREVIEW", cls.notify_include_preview),
             notify_max_per_minute=_int("NOTIFY_MAX_PER_MIN", cls.notify_max_per_minute),
             board_checkpoint_seconds=_int("BOARD_CHECKPOINT_SECONDS", cls.board_checkpoint_seconds),
+            revoked_key_ids=_key_ids(os.environ.get("REVOKED_KEY_IDS", "")),
             instance_signing_key_file=Path(os.environ["INSTANCE_SIGNING_KEY_FILE"])
             if os.environ.get("INSTANCE_SIGNING_KEY_FILE")
             else None,

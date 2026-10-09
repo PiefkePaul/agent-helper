@@ -236,3 +236,144 @@ def test_rotated_keys_still_count(make_client):
     keys.add_previous_key(registry, old, "revoked", "2026-10-02T00:00:00Z", "test")
     keys.add_previous_key(registry, old, "rotated", "2026-10-03T00:00:00Z", "test")
     assert registry[kid]["status"] == "revoked"
+
+
+def test_configured_revocations_survive_a_restore(make_client, tmp_path):
+    import shutil
+
+    first = make_client(board_checkpoint_seconds=0)
+    _post(first, "signed with the first key")
+    old_id, old_key = first.app.state.store.key_id, first.app.state.store.public_key
+    first.__exit__(None, None, None)
+    backup = tmp_path / "backup.db"
+    shutil.copy(tmp_path / "agent-helper.db", backup)
+
+    key_file = tmp_path / "instance.key"
+    key_file.write_text(keys.new_private_key())
+    # The database is restored from the backup, which knows nothing of any revocation; the configured
+    # list still applies.
+    shutil.copy(backup, tmp_path / "agent-helper.db")
+    client = make_client(
+        board_checkpoint_seconds=0, instance_signing_key_file=key_file, revoked_key_ids=((old_id, None),)
+    )
+    store = client.app.state.store
+    assert store.other_keys[old_id]["status"] == "revoked" and store.other_keys[old_id]["public_key"] == old_key
+    unknown = "0123456789abcdef"
+    other = make_client(instance_signing_key_file=key_file, revoked_key_ids=((old_id, None), (unknown, None)))
+    entry = other.app.state.store.other_keys[unknown]
+    assert entry["status"] == "revoked" and entry["public_key"] == ""
+    cp = {"seq": 1, "entry_hash": "0" * 64, "time": "2026-01-01T00:00:00Z", "key_id": unknown, "signature": "x"}
+    args = (_all_entries(other), [cp], other.app.state.store.instance, other.app.state.store.public_key)
+    assert board.verify_checkpoints(*args, other.app.state.store.other_keys) == []
+
+
+def test_the_current_key_cannot_be_listed_as_revoked(make_client):
+    client = make_client()
+    current = client.app.state.store.key_id
+    with pytest.raises(SystemExit):
+        make_client(revoked_key_ids=((current, None),))
+
+
+def test_malformed_revoked_key_ids_stop_the_start(monkeypatch):
+    from agent_helper.config import Settings
+
+    monkeypatch.setenv("REVOKED_KEY_IDS", "0123456789abcdef, not-a-key")
+    with pytest.raises(SystemExit):
+        Settings.from_env()
+    monkeypatch.setenv("REVOKED_KEY_IDS", " 0123456789ABCDEF ,")
+    assert Settings.from_env().revoked_key_ids == (("0123456789abcdef", None),)
+    monkeypatch.setenv("REVOKED_KEY_IDS", "0123456789abcdef@2026-10-09T12:00:00Z")
+    assert Settings.from_env().revoked_key_ids == (("0123456789abcdef", "2026-10-09T12:00:00Z"),)
+    monkeypatch.setenv("REVOKED_KEY_IDS", "0123456789abcdef@yesterday")
+    with pytest.raises(SystemExit):
+        Settings.from_env()
+
+
+def test_revocation_times_are_never_moved_later(make_client, tmp_path):
+    key_file = tmp_path / "instance.key"
+    key_file.write_text(keys.new_private_key())
+    kid = "0123456789abcdef"
+    first = make_client(instance_signing_key_file=key_file, revoked_key_ids=((kid, "2026-10-01T00:00:00Z"),))
+    assert first.app.state.store.other_keys[kid]["since"] == "2026-10-01T00:00:00Z"
+    first.__exit__(None, None, None)
+    later = make_client(instance_signing_key_file=key_file, revoked_key_ids=((kid, "2026-10-05T00:00:00Z"),))
+    assert later.app.state.store.other_keys[kid]["since"] == "2026-10-01T00:00:00Z"
+    later.__exit__(None, None, None)
+    undated = make_client(instance_signing_key_file=key_file, revoked_key_ids=((kid, None),))
+    assert undated.app.state.store.other_keys[kid]["since"] == "2026-10-01T00:00:00Z"
+    undated.__exit__(None, None, None)
+    earlier = make_client(instance_signing_key_file=key_file, revoked_key_ids=((kid, "2026-09-01T00:00:00Z"),))
+    assert earlier.app.state.store.other_keys[kid]["since"] == "2026-09-01T00:00:00Z"
+    fresh = "fedcba9876543210"
+    undated_new = make_client(instance_signing_key_file=key_file, revoked_key_ids=((fresh, None),))
+    assert "without a date" in undated_new.app.state.store.other_keys[fresh]["reason"]
+
+
+def test_revocations_get_a_fixed_recorded_at(make_client, tmp_path):
+    key_file = tmp_path / "instance.key"
+    key_file.write_text(keys.new_private_key())
+    kid = "0123456789abcdef"
+    first = make_client(instance_signing_key_file=key_file, revoked_key_ids=((kid, "2026-10-01T00:00:00Z"),))
+    store = first.app.state.store
+    recorded = store.other_keys[kid]["recorded_at"]
+    assert recorded >= "2026-10-09T00:00:00Z"
+    published = first.get("/.well-known/agent-helper.json").json()["instance_key"]["previous_keys"][kid]
+    assert published["recorded_at"] == recorded
+    with pytest.raises(sqlite3.IntegrityError):
+        store._db.execute("UPDATE key_revocations SET recorded_at = '2000-01-01T00:00:00Z'")
+    with pytest.raises(sqlite3.IntegrityError):
+        store._db.execute("DELETE FROM key_revocations")
+    first.__exit__(None, None, None)
+    again = make_client(instance_signing_key_file=key_file, revoked_key_ids=((kid, "2026-09-01T00:00:00Z"),))
+    assert again.app.state.store.other_keys[kid]["recorded_at"] == recorded  # since moved, recorded_at not
+
+
+def test_revocation_times_are_bounded(make_client, tmp_path):
+    first = make_client(board_checkpoint_seconds=0)
+    _post(first, "x")
+    old_id = first.app.state.store.key_id
+    first_checkpoint = first.get("/v1/board/checkpoints").json()["checkpoints"][0]["time"]
+    first.__exit__(None, None, None)
+    key_file = tmp_path / "instance.key"
+    key_file.write_text(keys.new_private_key())
+    with pytest.raises(SystemExit):  # before the key's first checkpoint
+        make_client(instance_signing_key_file=key_file, revoked_key_ids=((old_id, "2020-01-01T00:00:00Z"),))
+    with pytest.raises(SystemExit):  # in the future
+        make_client(instance_signing_key_file=key_file, revoked_key_ids=((old_id, "2099-01-01T00:00:00Z"),))
+    ok = make_client(instance_signing_key_file=key_file, revoked_key_ids=((old_id, first_checkpoint),))
+    assert ok.app.state.store.other_keys[old_id]["since"] == first_checkpoint
+
+
+def test_revocation_times_accept_only_one_form(monkeypatch):
+    from agent_helper.config import Settings
+
+    for bad in ("2026-10-09T12:00:00z", "2026-10-09 12:00:00Z", "2026-10-09T12:00Z", "２０26-10-09T12:00:00Z"):
+        monkeypatch.setenv("REVOKED_KEY_IDS", f"0123456789abcdef@{bad}")
+        with pytest.raises(SystemExit):
+            Settings.from_env()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "INSERT OR REPLACE INTO board_chain (seq, created_at, payload_sha256, prev_hash, entry_hash, v)"
+        " VALUES (1, 'x', 'x', 'x', 'forged', 1)",
+        "INSERT OR REPLACE INTO board_checkpoints (seq, entry_hash, time, key_id, signature)"
+        " VALUES (1, 'forged', 'x', 'x', 'x')",
+        "INSERT OR REPLACE INTO key_revocations (key_id, recorded_at)"
+        " VALUES ('0123456789abcdef', '2000-01-01T00:00:00Z')",
+        "REPLACE INTO board_chain (seq, created_at, payload_sha256, prev_hash, entry_hash, v)"
+        " VALUES (1, 'x', 'x', 'x', 'forged', 1)",
+    ],
+)
+def test_replace_cannot_bypass_the_no_delete_triggers(make_client, tmp_path, sql):
+    key_file = tmp_path / "instance.key"
+    key_file.write_text(keys.new_private_key())
+    client = make_client(
+        board_checkpoint_seconds=0,
+        instance_signing_key_file=key_file,
+        revoked_key_ids=(("0123456789abcdef", None),),
+    )
+    _post(client, "x")
+    with pytest.raises(sqlite3.IntegrityError):
+        client.app.state.store._db.execute(sql)
