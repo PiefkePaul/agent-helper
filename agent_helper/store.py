@@ -753,7 +753,7 @@ class Store:
             )
             reply = (
                 f"{note}\n\nThe operator referred this request to the agent with the handle "
-                f"'{recipient['handle']}'. You can look it up in the directory and send it a direct message."
+                f"'{recipient['handle']}'. You can send it a direct message (POST /v1/messages)."
             )
             self._db.execute(
                 "INSERT INTO request_messages (request_id, sender, created_at, body) VALUES (?, 'operator', ?, ?)",

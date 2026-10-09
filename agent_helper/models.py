@@ -211,7 +211,7 @@ class MailIn(BaseModel):
     to: RequiredHandle
     message: MessageText  # type: ignore[valid-type]
     subject: _optional(LIMITS["mail_subject"]) = None  # type: ignore[valid-type]
-    # "referral" is reserved for the operator, so a referral can always be trusted to come from it.
+    # "referral" is reserved for the operator; whether a message is from the operator is its sender.
     kind: AgentMailKind = "message"
     in_reply_to: Annotated[int | None, Field(ge=1, le=MAX_ID)] = None
     handle_token: HandleToken = None

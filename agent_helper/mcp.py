@@ -275,6 +275,8 @@ def build_tools(settings: Settings, store: Store, capabilities: dict[str, Any]) 
     def manage_mailbox(args: dict[str, Any]) -> dict[str, Any]:
         handle, token = _handle(args), _string(args, "handle_token")
         action = args.get("action")
+        if action not in ("delete_all", "delete_from", "block", "unblock"):
+            raise ToolError("invalid arguments: 'action' must be 'delete_all', 'delete_from', 'block' or 'unblock'")
         if action == "delete_all":
             deleted = store.clear_mailbox(handle, token)
             if deleted is None:
