@@ -483,9 +483,12 @@ def create_relay_app(settings: RelaySettings, sender: Sender | None = None) -> F
             raise HTTPException(400, f"send 'jobs', a list of at most {MAX_JOBS_PER_CALL}")
         # One bad job must not hold up the others: it is reported as refused (when it has a usable id)
         # and the rest go ahead.
+        # A job id that appears more than once in a call is ambiguous: every copy is refused.
+        ids = [job.get("job_id") for job in items if isinstance(job, dict) and isinstance(job.get("job_id"), str)]
+        repeated = {i for i in ids if ids.count(i) > 1}
         valid, refused = [], 0
         for job in items:
-            if valid_job(job):
+            if valid_job(job) and job["job_id"] not in repeated:
                 valid.append(job)
                 continue
             refused += 1

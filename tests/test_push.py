@@ -372,6 +372,18 @@ def test_relay_accepts_only_strict_jobs(tmp_path, changes):
     assert sender.post.calls == []
 
 
+def test_repeated_job_ids_are_all_refused(tmp_path):
+    client, sender = _relay_client(tmp_path)
+    jobs = [_job(1), _job(2), _job(1, url="https://b.example.org/x")]
+    body = json.dumps({"jobs": jobs}).encode()
+    response = client.post("/v1/relay/jobs", content=body, headers=_signed("POST", "/v1/relay/jobs", body))
+    assert response.json() == {"accepted": 1, "refused": 2}
+    sender.run_due()
+    assert [c[0].host for c in sender.post.calls] == ["hooks.example.com"]
+    outcomes = [(o["job_id"], o["outcome"]) for o in sender.outcomes(0)[0]]
+    assert sorted(outcomes) == [("job_1", "refused"), ("job_1", "refused"), ("job_2", "delivered")]
+
+
 def test_one_bad_job_does_not_block_the_others(tmp_path):
     client, sender = _relay_client(tmp_path)
     jobs = [_job(1), _job(2) | {"body": "padded "}, "not a job", _job(3, url="https://b.example.org/x")]
