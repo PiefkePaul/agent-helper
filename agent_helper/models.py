@@ -44,6 +44,15 @@ def _optional(max_length: int) -> object:
 
 
 MessageText = _text(LIMITS["message"])
+ExpiresInDays = Annotated[int | None, Field(ge=1, le=3650, strict=True)]
+MAX_OFFSET = 10_000
+
+
+def next_offset(offset: int, count: int, limit: int) -> int | None:
+    """The offset of the next page, or None when there is none or it would pass MAX_OFFSET."""
+    return offset + count if count == limit and offset + count <= MAX_OFFSET else None
+
+
 BoardTag = Annotated[str, Field(min_length=1, max_length=40, pattern=r"^[a-z0-9][a-z0-9-]*$")]
 Handle = Annotated[str | None, Field(max_length=LIMITS["handle"], pattern=HANDLE_PATTERN)]
 HandleToken = Annotated[str | None, Field(max_length=LIMITS["handle_token"])]
@@ -113,7 +122,7 @@ class BoardIn(BaseModel):
     handle_token: HandleToken = None
     topic: BoardTopic = None
     tags: list[BoardTag] = Field(default_factory=list, max_length=10)
-    expires_in_days: Annotated[int | None, Field(ge=1, le=3650)] = None
+    expires_in_days: ExpiresInDays = None
 
 
 class BoardEntry(BaseModel):
@@ -158,7 +167,7 @@ class OperatorBoardIn(BaseModel):
     content: BoardContent
     topic: BoardTopic = None
     tags: list[BoardTag] = Field(default_factory=list, max_length=10)
-    expires_in_days: Annotated[int | None, Field(ge=1, le=3650)] = None
+    expires_in_days: ExpiresInDays = None
 
 
 class HideIn(BaseModel):

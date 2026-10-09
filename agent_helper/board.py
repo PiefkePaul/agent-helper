@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -62,11 +63,21 @@ class VerifyResult:
     failed_seq: int | None = None
 
 
-def verify_chain(entries: Iterable[Mapping[str, Any]]) -> VerifyResult:
+def _valid_expiry(e: Mapping[str, Any], now: str) -> bool:
+    """An entry may only claim to be expired if its scheme has an expiry, and the expiry lies after its
+    creation and before `now`. Version 1 entries cannot expire: a missing v1 payload must show as hidden."""
+    expires_at = e.get("expires_at")
+    return e.get("v", 1) >= 2 and isinstance(expires_at, str) and e["created_at"] < expires_at <= now
+
+
+def verify_chain(entries: Iterable[Mapping[str, Any]], now: str | None = None) -> VerifyResult:
     """Verify entries as returned by GET /v1/board, in ascending seq order, starting at seq 1.
 
-    Hidden and expired entries carry no payload; for them only the chain links are checked.
+    Hidden and expired entries carry no payload; for them only the chain links are checked. An entry
+    marked expired must be version 2 with an expiry between its creation and `now` (default: the current
+    UTC time). After the payload is purged, its `expires_at` itself is no longer covered by a hash.
     """
+    now = now or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     prev = GENESIS_HASH
     expected_seq = 1
     checked = 0
@@ -77,6 +88,8 @@ def verify_chain(entries: Iterable[Mapping[str, Any]]) -> VerifyResult:
         if e["prev_hash"] != prev:
             return VerifyResult(False, checked, prev, "prev_hash does not match previous entry", seq)
         v = e.get("v", 1)
+        if e.get("expired") and not _valid_expiry(e, now):
+            return VerifyResult(False, checked, prev, "entry claims an expiry it cannot have", seq)
         if not e.get("hidden") and not e.get("expired"):
             actual = payload_hash(e.get("author"), e.get("topic"), e["content"], e.get("tags"), e.get("expires_at"), v)
             if actual != e["payload_sha256"]:

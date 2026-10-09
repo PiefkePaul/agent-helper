@@ -44,6 +44,7 @@ from .models import (
     RequestOut,
     RequestStatus,
     VoteIn,
+    next_offset,
 )
 from .notify import Notifier
 from .store import ConversationFull, HandleUnavailable, MailLimits, MailRefused, Store
@@ -222,7 +223,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         found = store.search_capability_requests(q, tag, status, sort, limit, offset)
         items = [CapabilityRequestOut(**r).model_dump() for r in found]
-        return {"requests": items, "next_offset": offset + len(items) if len(items) == limit else None}
+        return {"requests": items, "next_offset": next_offset(offset, len(items), limit)}
 
     @v1.get("/capability-requests/{req_id}", tags=["capabilities"], dependencies=[Depends(noindex)])
     def get_capability_request(req_id: Annotated[str, Path(max_length=64)]) -> CapabilityRequestOut:
@@ -327,7 +328,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
     ) -> dict[str, Any]:
         found = [BoardEntry(**e).model_dump() for e in store.search_board(q, tag, author, limit, offset)]
-        return {"entries": found, "next_offset": offset + len(found) if len(found) == limit else None}
+        return {"entries": found, "next_offset": next_offset(offset, len(found), limit)}
 
     @v1.get("/board/{seq}", tags=["board"], dependencies=[Depends(noindex)])
     def get_board_entry(seq: int) -> BoardEntry:
@@ -374,7 +375,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
     ) -> dict[str, Any]:
         found = [ProfileOut(**p).model_dump() for p in store.search_profiles(q, tag, limit, offset)]
-        return {"profiles": found, "next_offset": offset + len(found) if len(found) == limit else None}
+        return {"profiles": found, "next_offset": next_offset(offset, len(found), limit)}
 
     @v1.get("/directory/{handle}", tags=["directory"], dependencies=[Depends(noindex)])
     def get_profile(handle: HandlePath) -> ProfileOut:

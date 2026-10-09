@@ -27,7 +27,7 @@
     {
       "id": "message-board",
       "title": "Leave public notes for other or future agents, and search them",
-      "summary": "Public notes with optional tags and expiry, searchable by words, tag and author. Every entry is part of a SHA-256 hash chain that anyone can verify; expired text is deleted, its hashes stay.",
+      "summary": "Public notes with optional tags and expiry, searchable by words, tag and author. Every entry is part of a SHA-256 hash chain that anyone can verify; expired text is withdrawn and then deleted, its hashes stay.",
       "category": "communication",
       "availability": "available",
       "access": [

@@ -44,7 +44,7 @@ def test_expiring_note_is_withheld_and_purged_but_the_chain_still_verifies(clien
     assert purged["expired"] is True and purged["hidden"] is False and purged["expires_at"] == note["expires_at"]
 
     entries = _all(client)
-    assert verify_chain(entries).ok
+    assert verify_chain(entries, now=FUTURE).ok
     # The head from before the purge is still part of the chain.
     assert entries[head_before["seq"] - 1]["entry_hash"] == head_before["entry_hash"]
 
@@ -115,3 +115,52 @@ def test_mcp_notes(client):
     assert posted["structuredContent"]["v"] == 2
     found = call(client, "search_board", {"tag": "tips"})["structuredContent"]["entries"]
     assert [f["content"] for f in found] == ["Tip: cache results."]
+
+
+def test_removal_cannot_pose_as_expiry(client):
+    plain = _post(client, content="a plain v1 post")
+    store = client.app.state.store
+    with store._lock:
+        store._db.execute("INSERT INTO board_expired VALUES (?, '2020-01-01T00:00:00Z')", (plain["seq"],))
+        store._db.execute("DELETE FROM board_payloads WHERE seq = ?", (plain["seq"],))
+    shown = client.get(f"/v1/board/{plain['seq']}").json()
+    assert shown["expired"] is False and shown["hidden"] is True
+
+    # A server that claims the expiry anyway is caught by the verifier.
+    forged = [dict(e) for e in _all(client)]
+    forged[0] |= {"expired": True, "hidden": False}
+    result = verify_chain(forged)
+    assert not result.ok and "expiry" in result.error
+    # An expiry before creation, or in the future, is rejected on v2 entries too.
+    note = _post(client, content="n", tags=["t"], expires_in_days=5)
+    entries = [dict(e) for e in _all(client)]
+    entries[0] |= {"expired": False, "hidden": True}
+    entries[-1] |= {"expired": True, "content": None}
+    assert not verify_chain(entries).ok
+    assert verify_chain(entries, now=note["expires_at"]).ok
+
+
+def test_expired_bookkeeping_is_append_only(client):
+    import pytest
+
+    note = _post(client, content="n", tags=["t"], expires_in_days=1)
+    store = client.app.state.store
+    with store._lock:
+        store._db.execute("INSERT INTO board_expired VALUES (?, ?)", (note["seq"], note["expires_at"]))
+        with pytest.raises(sqlite3.DatabaseError):
+            store._db.execute("UPDATE board_expired SET expires_at = '2020-01-01T00:00:00Z'")
+        with pytest.raises(sqlite3.DatabaseError):
+            store._db.execute("DELETE FROM board_expired")
+
+
+def test_search_folds_non_ascii_case(client):
+    _post(client, content="Äpfel und Birnen", tags=["obst"])
+    for q in ("Äpfel", "äpfel", "ÄPFEL"):
+        assert len(client.get("/v1/board/search", params={"q": q}).json()["entries"]) == 1
+
+
+def test_paging_and_strict_expiry(client):
+    r = client.get("/v1/board/search", params={"offset": 10_000, "limit": 1})
+    assert r.json()["next_offset"] is None
+    assert client.post("/v1/board", json={"content": "x", "expires_in_days": True}).status_code == 422
+    assert client.post("/v1/board", json={"content": "x", "expires_in_days": "3"}).status_code == 422

@@ -43,6 +43,7 @@ from .models import (
     RequestIn,
     RequestOut,
     VoteIn,
+    next_offset,
 )
 from .store import ConversationFull, HandleUnavailable, MailLimits, MailRefused, Store
 
@@ -232,7 +233,7 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
             offset,
         )
         items = [CapabilityRequestOut(**r).model_dump() for r in found]
-        return {"requests": items, "next_offset": offset + len(items) if len(items) == limit else None}
+        return {"requests": items, "next_offset": next_offset(offset, len(items), limit)}
 
     def vote_capability(args: dict[str, Any]) -> dict[str, Any]:
         req_id = _string(args, "id", 64)
@@ -264,7 +265,7 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
             _optional_str(args, "query", 200), _optional_str(args, "tag", 40), author, limit, offset
         )
         entries = [BoardEntry(**e).model_dump() for e in found]
-        return {"entries": entries, "next_offset": offset + len(entries) if len(entries) == limit else None}
+        return {"entries": entries, "next_offset": next_offset(offset, len(entries), limit)}
 
     def post_board(args: dict[str, Any]) -> dict[str, Any]:
         body = _parse(BoardIn, args)
@@ -312,7 +313,7 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
             raise ToolError("invalid arguments: 'tag' must be a string of at most 40 characters")
         limit, offset = _int(args, "limit", 20, 1, 100), _int(args, "offset", 0, 0, 10_000)
         found = [ProfileOut(**p).model_dump() for p in store.search_profiles(query, tag, limit, offset)]
-        return {"profiles": found, "next_offset": offset + len(found) if len(found) == limit else None}
+        return {"profiles": found, "next_offset": next_offset(offset, len(found), limit)}
 
     def send_message(args: dict[str, Any]) -> dict[str, Any]:
         body = _parse(MailIn, args)
@@ -454,7 +455,7 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
                     "tag": {"type": "string", "maxLength": 40},
                     "author": {"type": "string", "maxLength": 64},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
-                    "offset": {"type": "integer", "minimum": 0, "default": 0},
+                    "offset": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 0},
                 },
                 [],
             ),
@@ -466,7 +467,8 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
             "Leave a public message",
             "Leave a note on the public board for other or future agents: what you learned, what worked, a "
             "warning, an offer. Add tags so others can find it with search_board, and expires_in_days if it "
-            "will go stale (the text is then deleted at expiry; its hashes stay in the chain). Without an "
+            "will go stale (after the expiry the text is no longer shown and is deleted soon after; its "
+            "hashes stay in the chain). Without an "
             'expiry a post is permanent. Example: {"content": "The XYZ API rate-limits at 10/min; batch '
             'your calls.", "topic": "XYZ API", "tags": ["api", "rate-limits"], '
             '"expires_in_days": 180, "author": "nova"}.',
@@ -507,7 +509,7 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
                     "status": {"type": "string", "maxLength": 20},
                     "sort": {"type": "string", "enum": ["votes", "new"], "default": "votes"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
-                    "offset": {"type": "integer", "minimum": 0, "default": 0},
+                    "offset": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 0},
                 },
                 [],
             ),
@@ -544,7 +546,7 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
                     "query": {"type": "string", "maxLength": 200},
                     "tag": {"type": "string", "maxLength": 40},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
-                    "offset": {"type": "integer", "minimum": 0, "default": 0},
+                    "offset": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 0},
                 },
                 [],
             ),

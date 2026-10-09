@@ -76,6 +76,10 @@ CREATE TABLE IF NOT EXISTS board_expired (
     seq        INTEGER PRIMARY KEY REFERENCES board_chain (seq),
     expires_at TEXT NOT NULL
 );
+CREATE TRIGGER IF NOT EXISTS board_expired_no_update BEFORE UPDATE ON board_expired
+BEGIN SELECT RAISE(ABORT, 'board_expired is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS board_expired_no_delete BEFORE DELETE ON board_expired
+BEGIN SELECT RAISE(ABORT, 'board_expired is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS board_chain_no_update BEFORE UPDATE ON board_chain
 BEGIN SELECT RAISE(ABORT, 'board_chain is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS board_chain_no_delete BEFORE DELETE ON board_chain
@@ -209,6 +213,10 @@ class Store:
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA foreign_keys=ON")
+        self._db.execute("PRAGMA secure_delete=ON")  # deleted text (expired notes, purged mail) is overwritten
+        # SQLite's lower() only folds ASCII; search compares Python-lowercased text on both sides.
+        self._db.create_function("py_lower", 1, lambda s: s.lower() if isinstance(s, str) else s, deterministic=True)
+        self._last_board_purge = -1e9
         self._db.executescript(SCHEMA)
         self._migrate()
 
@@ -463,7 +471,8 @@ class Store:
     @staticmethod
     def _board_view(r: sqlite3.Row) -> dict[str, Any]:
         expires_at = r["expires_at"] or r["expired_at"]
-        expired = r["expired_at"] is not None or (expires_at is not None and expires_at <= now())
+        # Only version 2 entries can expire (their expiry is hashed); a missing v1 payload shows as hidden.
+        expired = r["v"] >= 2 and (r["expired_at"] is not None or (expires_at is not None and expires_at <= now()))
         hidden = r["hidden_reason"] is not None or (r["content"] is None and not expired)
         withheld = hidden or expired
         return {
@@ -508,7 +517,7 @@ class Store:
         params: list[Any] = [now()]
         for term in (query or "").lower().split()[:8]:
             escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            where.append("lower(coalesce(p.topic, '') || ' ' || p.content) LIKE ? ESCAPE '\\'")
+            where.append("py_lower(coalesce(p.topic, '') || ' ' || p.content) LIKE ? ESCAPE '\\'")
             params.append(f"%{escaped}%")
         if tag:
             where.append("EXISTS (SELECT 1 FROM json_each(coalesce(p.tags, '[]')) WHERE value = ?)")
@@ -518,11 +527,25 @@ class Store:
             params.append(author)
         sql = f"{self._BOARD_SELECT} WHERE {' AND '.join(where)} ORDER BY c.seq DESC LIMIT ? OFFSET ?"  # noqa: S608
         with self._lock:
+            self._purge_board_if_due()
             rows = self._db.execute(sql, (*params, limit, offset)).fetchall()
             return [self._board_view(r) for r in rows]
 
+    def _purge_board_if_due(self) -> None:
+        """Purge expired payloads on reads too, at most once a minute. The caller holds the lock."""
+        if time.monotonic() - self._last_board_purge >= 60:
+            self._last_board_purge = time.monotonic()
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._purge_expired_board_payloads()
+            except BaseException:
+                self._db.execute("ROLLBACK")
+                raise
+            self._db.execute("COMMIT")
+
     def list_board(self, after: int, limit: int) -> list[dict[str, Any]]:
         with self._lock:
+            self._purge_board_if_due()
             return self._board_entries(after=after, limit=limit)
 
     def get_board_entry(self, seq: int) -> dict[str, Any] | None:
