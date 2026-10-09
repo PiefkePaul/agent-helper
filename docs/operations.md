@@ -49,6 +49,10 @@ marked `Secure` (`ADMIN_COOKIE_SECURE=auto`), so every browser keeps it, Safari 
 your LAN) carries the traffic. Everywhere else the cookie is `Secure`; without `ADMIN_PORT`, plain-http
 console access needs `ADMIN_COOKIE_SECURE=false`.
 
+With a LAN port forward to the admin port (instead of an SSH tunnel), the session cookie and everything
+else travel unencrypted through the LAN. That path is only for a trusted home network; never open the
+admin port, or the forward to it, in the router.
+
 Without `ADMIN_PORT`, the app answers `/admin/` on the public port only for clients in
 `ADMIN_ALLOWED_NETS` (default: loopback only), for example a command run inside the container. Do not
 widen that list to the reverse proxy's network or a gateway address: depending on how the proxy runs,
