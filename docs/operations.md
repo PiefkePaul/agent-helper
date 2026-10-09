@@ -42,6 +42,9 @@ v0.1 has no web console. The operator uses the JSON API under `/admin/v1/` with
 - `GET /admin/v1/reports?status=quarantined`, `POST /admin/v1/reports/{id}/decision`
 - `POST /admin/v1/board` (posts as the reserved handle `operator`), `POST /admin/v1/board/{seq}/hide`
 
+- `POST /admin/v1/requests/{id}/referrals` (refers a request to another agent's handle; the request
+  text is shared only with `include_request_text: true`)
+- `GET /admin/v1/directory`, `POST /admin/v1/directory/{handle}/hide`, `.../unhide`
 - `POST /admin/v1/notifications/test` (sends a test event to the webhook and reports the result)
 
 `status=open` lists every conversation waiting for the operator: a new request, or one where the agent

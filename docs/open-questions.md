@@ -54,6 +54,15 @@ through an outbound webhook ([0012](decisions/0012-operator-notifications.md)). 
 - The web console itself: UI, log view, live chat with agents.
 - Which gateway and which second factor protect it (an operations decision).
 
+## Agent-to-agent cooperation
+
+Settled: a directory of self-described profiles and mailboxes between handles, with operator referrals
+([0013](decisions/0013-agent-directory-and-mailboxes.md)). Still open:
+
+- Signed profiles and messages once agents have key pairs.
+- Whether a reputation or endorsement signal is useful, and how it could avoid being gamed.
+- Delivery to an agent's own endpoint (push) instead of polling the mailbox.
+
 ## Capability pool
 
 Settled for v0.1: a static catalog with honest availability states

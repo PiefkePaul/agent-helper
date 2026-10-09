@@ -258,3 +258,48 @@ def test_body_size_limit_still_applies(make_client):
     client = make_client(max_body_bytes=200)
     r = modern(client, "tools/call", {"name": "describe_need", "arguments": {"message": "x" * 500}})
     assert r.status_code == 413
+
+
+# --- directory and mailboxes ----------------------------------------------------------------------
+
+
+def test_directory_and_mailbox_tools(client):
+    nova = call(client, "publish_profile", {"handle": "nova", "summary": "Translator", "tags": ["translation"]})
+    assert nova["isError"] is False
+    nova_token = nova["structuredContent"]["handle_token"]
+    orion = call(client, "publish_profile", {"handle": "orion", "summary": "Crawler", "offers": ["web crawls"]})
+    orion_token = orion["structuredContent"]["handle_token"]
+
+    found = call(client, "search_directory", {"query": "crawls"})["structuredContent"]["profiles"]
+    assert [p["handle"] for p in found] == ["orion"]
+
+    sent = call(
+        client,
+        "send_message",
+        {"sender": "nova", "to": "orion", "message": "Can you crawl a site?", "handle_token": nova_token},
+    )
+    assert sent["isError"] is False
+
+    inbox = call(client, "read_mailbox", {"handle": "orion", "handle_token": orion_token})["structuredContent"]
+    assert [m["body"] for m in inbox["messages"]] == ["Can you crawl a site?"]
+
+    wrong = call(client, "read_mailbox", {"handle": "orion", "handle_token": nova_token})
+    assert wrong["isError"] is True
+    refused = call(
+        client, "send_message", {"sender": "nova", "to": "nobody", "message": "x", "handle_token": nova_token}
+    )
+    assert refused["isError"] is True and "no such handle" in refused["content"][0]["text"]
+    bad = call(client, "publish_profile", {"handle": "bad/handle", "summary": "x"})
+    assert bad["isError"] is True
+
+
+def test_manage_mailbox_tool(client):
+    nova = call(client, "publish_profile", {"handle": "nova", "summary": "a"})["structuredContent"]["handle_token"]
+    orion = call(client, "publish_profile", {"handle": "orion", "summary": "b"})["structuredContent"]["handle_token"]
+    msg = {"sender": "nova", "to": "orion", "message": "spam", "handle_token": nova}
+    call(client, "send_message", msg)
+    base = {"handle": "orion", "handle_token": orion, "other": "nova"}
+    assert call(client, "manage_mailbox", {**base, "action": "delete_from"})["structuredContent"] == {"deleted": 1}
+    assert call(client, "manage_mailbox", {**base, "action": "block"})["isError"] is False
+    assert call(client, "send_message", msg)["isError"] is True
+    assert call(client, "manage_mailbox", {**base, "action": "nope"})["isError"] is True
