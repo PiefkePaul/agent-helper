@@ -260,7 +260,19 @@ def build_console(
 ) -> APIRouter:
     router = APIRouter(include_in_schema=False)
     sessions = Sessions()
-    secure_cookie = settings.public_base_url.lower().startswith("https://")
+
+    def secure_cookie(request: Request) -> bool:
+        """`Secure` by default. The one automatic exception is a plain-http login on the admin port, which is
+        published on the host only (reached by SSH tunnel or a LAN port forward; Safari drops Secure cookies
+        over plain http). Anything else needs ADMIN_COOKIE_SECURE=false: a host name or the absence of proxy
+        headers proves nothing, since a plain proxy_pass to 127.0.0.1 looks exactly like a tunnel."""
+        if settings.admin_cookie_secure is not None:
+            return settings.admin_cookie_secure
+        if request.url.scheme == "https":
+            return True
+        server = request.scope.get("server")
+        on_admin_port = settings.admin_port is not None and server is not None and server[1] == settings.admin_port
+        return not on_admin_port
 
     def enabled() -> None:
         if not settings.admin_enabled:
@@ -357,7 +369,7 @@ def build_console(
             max_age=SESSION_SECONDS,
             path="/admin",
             httponly=True,
-            secure=secure_cookie,
+            secure=secure_cookie(request),
             samesite="strict",
         )
         return response
@@ -762,6 +774,10 @@ def build_console(
                 break
             after = page[-1]["seq"]
         result = board.verify_chain(entries)
+        if result.ok and result.warnings:
+            listed = "; ".join(result.warnings[:5]) + (" …" if len(result.warnings) > 5 else "")
+            msg = f"Chain verified: {result.checked} entries, but {len(result.warnings)} warning(s): {listed}"
+            return _redirect("/admin/console/board", msg, error=True)
         if result.ok:
             return _redirect("/admin/console/board", f"Chain verified: {result.checked} entries, head matches.")
         return _redirect("/admin/console/board", f"Chain broken at #{result.failed_seq}: {result.error}", error=True)

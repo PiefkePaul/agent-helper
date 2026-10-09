@@ -293,6 +293,7 @@ class Store:
             "board_payloads": [("tags", "TEXT"), ("expires_at", "TEXT"), ("key_id", "TEXT"), ("signature", "TEXT")],
             "mail": [("key_id", "TEXT"), ("signature", "TEXT")],
             "board_purged": [("expires_at", "TEXT")],
+            "requests": [("closed_by", "TEXT")],
         }
         for table, columns in added.items():
             present = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
@@ -387,6 +388,7 @@ class Store:
             "handle": row["handle"],
             "contact_hint": row["contact_hint"],
             "messages": [dict(m) for m in msgs],
+            "closed_by": row["closed_by"],
         }
 
     def get_request(self, req_id: str, token: str) -> dict[str, Any] | None:
@@ -408,10 +410,22 @@ class Store:
                 "INSERT INTO request_messages (request_id, sender, created_at, body) VALUES (?, 'agent', ?, ?)",
                 (req_id, now(), body),
             )
-            self._db.execute("UPDATE requests SET status = 'open' WHERE id = ?", (req_id,))
+            self._db.execute("UPDATE requests SET status = 'open', closed_by = NULL WHERE id = ?", (req_id,))
             row = self._db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
             view = self._request_view(row)
         self._on_event("request.message", id=req_id, handle=view["handle"], preview=body)
+        return view
+
+    def close_request(self, req_id: str, token: str) -> dict[str, Any] | None:
+        """The agent closes its own request (A2A CancelTask). None: wrong id or token."""
+        with self._tx():
+            row = self._check_token("requests", req_id, token)
+            if row is None:
+                return None
+            self._db.execute("UPDATE requests SET status = 'closed', closed_by = 'agent' WHERE id = ?", (req_id,))
+            row = self._db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
+            view = self._request_view(row)
+        self._on_event("request.closed", id=req_id, handle=view["handle"])
         return view
 
     def get_request_admin(self, req_id: str) -> dict[str, Any] | None:
@@ -438,7 +452,8 @@ class Store:
                 "INSERT INTO request_messages (request_id, sender, created_at, body) VALUES (?, 'operator', ?, ?)",
                 (req_id, now(), body),
             )
-            self._db.execute("UPDATE requests SET status = ? WHERE id = ?", (status, req_id))
+            closed_by = "operator" if status == "closed" else None
+            self._db.execute("UPDATE requests SET status = ?, closed_by = ? WHERE id = ?", (status, closed_by, req_id))
             row = self._db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
             return self._request_view(row)
 
