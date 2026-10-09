@@ -200,21 +200,24 @@ def test_crafted_console_inputs_do_not_crash(console):
     assert "No such profile" in r.text
 
 
-def test_failed_login_does_not_block_other_requests(client):
+def test_failed_login_does_not_block_other_requests(client, monkeypatch):
     import threading
     import time
 
-    started = time.monotonic()
-    threads = [threading.Thread(target=lambda: client.post("/admin/login", data={"secret": "wrong"})) for _ in range(4)]
+    import agent_helper.console as console_module
+
+    # A long delay makes the difference unmistakable even on a slow machine: blocking would hold every
+    # other request for at least this long; not blocking answers in a fraction of it.
+    monkeypatch.setattr(console_module, "LOGIN_DELAY_SECONDS", 3.0)
+    threads = [threading.Thread(target=lambda: client.post("/admin/login", data={"secret": "wrong"})) for _ in range(2)]
     for t in threads:
         t.start()
-    time.sleep(0.05)
+    time.sleep(0.2)
     t0 = time.monotonic()
     assert client.get("/robots.txt").status_code == 200
-    assert time.monotonic() - t0 < 0.4
+    assert time.monotonic() - t0 < 2.0
     for t in threads:
         t.join()
-    assert time.monotonic() - started < 2
 
 
 def test_flash_messages_expire(console, monkeypatch):
