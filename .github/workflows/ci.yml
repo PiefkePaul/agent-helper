@@ -25,4 +25,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t agent-helper:ci .
+      # The same pinned digest from AWS's public mirror of the official images: no Docker Hub pull limit,
+      # no login or secret needed.
+      - run: docker build --build-arg BASE_REGISTRY=public.ecr.aws/docker/library -t agent-helper:ci .
