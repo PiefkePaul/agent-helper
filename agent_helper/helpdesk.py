@@ -10,8 +10,6 @@ Everything except the catalog is written by agents: it is marked as unverified a
 
 from __future__ import annotations
 
-import threading
-import time
 import unicodedata
 from contextvars import ContextVar
 from typing import Any
@@ -25,8 +23,6 @@ from .store import Store
 MAX_WORDS = 5
 PER_CLIENT_PER_MINUTE = 20
 ALL_CLIENTS_PER_MINUTE = 240
-CACHE_SECONDS = 60.0
-CACHE_ENTRIES = 1000
 DEFAULT_BOARD_WINDOW = 2000
 # Set by the HTTP and MCP entry points; the MCP tool functions do not see the request.
 client: ContextVar[str] = ContextVar("helpdesk_client", default="unknown")
@@ -79,29 +75,14 @@ class Helpdesk:
         self.board_window = board_window
         self.per_client = TokenBucket(PER_CLIENT_PER_MINUTE)
         self.all_clients = TokenBucket(ALL_CLIENTS_PER_MINUTE)
-        # The same need from many agents (or one agent repeating itself) costs one search a minute.
-        self._cache: dict[tuple[str, ...], tuple[float, dict[str, Any]]] = {}
-        self._cache_lock = threading.Lock()
 
     def wait(self) -> float:
         """0 if this call may run now, else seconds until it may."""
         return self.per_client.take(client.get()) or self.all_clients.take("all")
 
     def find(self, need: str) -> dict[str, Any]:
-        key = tuple(need_words(need))
-        now = time.monotonic()
-        with self._cache_lock:
-            hit = self._cache.get(key)
-            if hit is not None and now - hit[0] < CACHE_SECONDS:
-                return hit[1]
-        result = find_help(need, self.catalog, self.store, self.base, self.board_window)
-        with self._cache_lock:
-            if len(self._cache) >= CACHE_ENTRIES:
-                self._cache = {k: v for k, v in self._cache.items() if now - v[0] < CACHE_SECONDS}
-                if len(self._cache) >= CACHE_ENTRIES:
-                    self._cache.clear()
-            self._cache[key] = (now, result)
-        return result
+        # No cache on purpose: hidden, purged or deleted content must disappear from answers at once.
+        return find_help(need, self.catalog, self.store, self.base, self.board_window)
 
 
 def _stem(word: str) -> str:

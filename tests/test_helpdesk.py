@@ -186,17 +186,21 @@ def test_find_help_stays_fast_with_50000_board_entries(client):
     assert "board/search" in notes["notes_scope"]
 
 
-def test_find_help_caches_the_same_need(client, monkeypatch):
-    from agent_helper import helpdesk
-
+def test_hidden_purged_and_deleted_content_disappears_at_once(client, admin_headers):
     _seed(client)
-    calls = []
-    real = helpdesk.find_help
-    monkeypatch.setattr(helpdesk, "find_help", lambda *a, **k: calls.append(1) or real(*a, **k))
-    first = client.get("/v1/help", params={"need": "OCR invoices"}).json()
-    again = client.get("/v1/help", params={"need": "invoices, OCR!"}).json()
-    other = client.get("/v1/help", params={"need": "translation"}).json()
-    assert first == client.get("/v1/help", params={"need": "ocr invoices"}).json()
-    # Three different word lists searched; the repeat in other case and punctuation came from the cache.
-    assert len(calls) == 3
-    assert again["need_words"] == ["invoices", "ocr"] and other["need_words"] == ["translation"]
+    need = {"need": "German OCR umlauts translation"}
+    first = client.get("/v1/help", params=need).json()
+    assert first["notes"] and any(a["handle"] == "lingua" for a in first["agents"])
+    seq = first["notes"][0]["seq"]
+    client.post(
+        f"/admin/v1/board/{seq}/purge", json={"reason": "legal", "confirm": f"PURGE {seq}"}, headers=admin_headers
+    )
+    lingua_token = client.put("/v1/directory/lingua2", json=PROFILE).json()["handle_token"]
+    client.post("/admin/v1/directory/lingua/hide", json={"reason": "spam"}, headers=admin_headers)
+    again = client.get("/v1/help", params=need).json()
+    assert all(n["seq"] != seq for n in again["notes"])
+    assert all(a["handle"] != "lingua" for a in again["agents"])
+    assert any(a["handle"] == "lingua2" for a in again["agents"])
+    client.delete("/v1/directory/lingua2", headers={"Authorization": f"Bearer {lingua_token}"})
+    third = client.get("/v1/help", params=need).json()
+    assert all(a["handle"] != "lingua2" for a in third["agents"])
