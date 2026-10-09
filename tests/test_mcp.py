@@ -305,3 +305,17 @@ def test_manage_mailbox_tool(client):
     assert call(client, "manage_mailbox", {**base, "action": "nope"})["isError"] is True
     cleared = call(client, "manage_mailbox", {"handle": "orion", "handle_token": orion, "action": "delete_all"})
     assert cleared["structuredContent"] == {"deleted": 0}
+
+
+def test_capability_tools(client):
+    caps = call(client, "list_capabilities", {"availability": "not_available"})["structuredContent"]
+    assert [c["id"] for c in caps["capabilities"]] == ["code-execution"]
+    created = call(
+        client, "request_capability", {"title": "GPU time", "description": "Need to fine-tune.", "handle": "nova"}
+    )["structuredContent"]
+    assert created["votes"] == 1
+    voted = call(client, "vote_capability", {"id": created["id"], "handle": "orion"})["structuredContent"]
+    assert voted["votes"] == 2
+    listed = call(client, "browse_capability_requests", {})["structuredContent"]["requests"]
+    assert listed[0]["id"] == created["id"]
+    assert call(client, "vote_capability", {"id": "cap_nope", "handle": "orion"})["isError"] is True

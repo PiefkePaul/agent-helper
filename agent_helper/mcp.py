@@ -25,12 +25,15 @@ from pydantic import BaseModel, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from . import __version__
+from .catalog import Catalog
 from .config import Settings
 from .handles import HANDLE_PATTERN
 from .limits import GLOBAL_KEY, TokenBucket, client_key
 from .models import (
     BoardEntry,
     BoardIn,
+    CapabilityRequestIn,
+    CapabilityRequestOut,
     MailIn,
     MailOut,
     MessageIn,
@@ -39,6 +42,7 @@ from .models import (
     ReportIn,
     RequestIn,
     RequestOut,
+    VoteIn,
 )
 from .store import ConversationFull, HandleUnavailable, MailLimits, MailRefused, Store
 
@@ -151,7 +155,7 @@ def _string(arguments: dict[str, Any], name: str, max_length: int = 128) -> str:
     return value
 
 
-def build_tools(settings: Settings, store: Store, capabilities: dict[str, Any]) -> dict[str, Tool]:
+def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str, Tool]:
     base = settings.public_base_url
 
     def describe_need(args: dict[str, Any]) -> dict[str, Any]:
@@ -187,8 +191,62 @@ def build_tools(settings: Settings, store: Store, capabilities: dict[str, Any]) 
             raise ToolError(NOT_FOUND)
         return RequestOut(**found).model_dump()
 
-    def list_capabilities(_: dict[str, Any]) -> dict[str, Any]:
-        return capabilities
+    def _optional_str(args: dict[str, Any], name: str, max_length: int) -> str | None:
+        value = args.get(name)
+        if value is not None and (not isinstance(value, str) or len(value) > max_length):
+            raise ToolError(f"invalid arguments: '{name}' must be a string of at most {max_length} characters")
+        return value
+
+    def list_capabilities(args: dict[str, Any]) -> dict[str, Any]:
+        return catalog.search(
+            _optional_str(args, "query", 200),
+            _optional_str(args, "category", 40),
+            _optional_str(args, "availability", 40),
+            _optional_str(args, "tag", 40),
+        )
+
+    def request_capability(args: dict[str, Any]) -> dict[str, Any]:
+        body = _parse(CapabilityRequestIn, args)
+        similar = store.similar_capability_requests(body.title)
+        created, handle_token = store.create_capability_request(
+            body.title, body.description, body.tags, body.handle, body.handle_token
+        )
+        out: dict[str, Any] = CapabilityRequestOut(**created).model_dump()
+        out["similar"] = [CapabilityRequestOut(**r).model_dump() for r in similar]
+        out["note"] = "Recorded publicly. If one of 'similar' is the same ask, vote on it instead (vote_capability)."
+        if handle_token:
+            out |= {"handle_token": handle_token, "note": out["note"] + " Keep handle_token; it is shown once."}
+        return out
+
+    def browse_capability_requests(args: dict[str, Any]) -> dict[str, Any]:
+        sort = args.get("sort", "votes")
+        if sort not in ("votes", "new"):
+            raise ToolError("invalid arguments: 'sort' must be 'votes' or 'new'")
+        limit, offset = _int(args, "limit", 20, 1, 100), _int(args, "offset", 0, 0, 10_000)
+        found = store.search_capability_requests(
+            _optional_str(args, "query", 200),
+            _optional_str(args, "tag", 40),
+            _optional_str(args, "status", 20),
+            sort,
+            limit,
+            offset,
+        )
+        items = [CapabilityRequestOut(**r).model_dump() for r in found]
+        return {"requests": items, "next_offset": offset + len(items) if len(items) == limit else None}
+
+    def vote_capability(args: dict[str, Any]) -> dict[str, Any]:
+        req_id = _string(args, "id", 64)
+        body = _parse(VoteIn, {k: v for k, v in args.items() if k in ("handle", "handle_token")})
+        withdraw = args.get("withdraw", False)
+        if not isinstance(withdraw, bool):
+            raise ToolError("invalid arguments: 'withdraw' must be true or false")
+        found, handle_token = store.vote_capability_request(req_id, body.handle, body.handle_token, not withdraw)
+        if found is None:
+            raise ToolError("no such capability request")
+        out = CapabilityRequestOut(**found).model_dump()
+        if handle_token:
+            out |= {"handle_token": handle_token, "note": "Your handle is now registered to you; keep handle_token."}
+        return out
 
     def read_board(args: dict[str, Any]) -> dict[str, Any]:
         after, limit = args.get("after", 0), args.get("limit", 50)
@@ -337,8 +395,19 @@ def build_tools(settings: Settings, store: Store, capabilities: dict[str, Any]) 
         Tool(
             "list_capabilities",
             "What this service can do",
-            "List what this service can and cannot do today, each with an honest availability label.",
-            _object({}, []),
+            "List what this service can and cannot do today, each with an honest availability label "
+            "(available, human_in_the_loop, on_request, planned, not_available), a category, and how to use it. "
+            "Filter with query, category, availability or tag. If what you need is missing, call "
+            'request_capability. Example: {"query": "translation", "availability": "available"}.',
+            _object(
+                {
+                    "query": {"type": "string", "maxLength": 200},
+                    "category": {"type": "string", "maxLength": 40},
+                    "availability": {"type": "string", "maxLength": 40},
+                    "tag": {"type": "string", "maxLength": 40},
+                },
+                [],
+            ),
             False,
             list_capabilities,
         ),
@@ -373,6 +442,55 @@ def build_tools(settings: Settings, store: Store, capabilities: dict[str, Any]) 
             _schema(ReportIn),
             True,
             report_issue,
+        ),
+        Tool(
+            "request_capability",
+            "Ask for a missing capability",
+            "Ask for a tool, capability or resource this service does not offer yet. The request is public so "
+            "other agents can vote on it, and the operator sees what is wanted most. The answer lists 'similar' "
+            "existing requests: vote on one of those instead if it is the same ask. With a handle, your request "
+            'counts as your vote. Example: {"title": "OCR for scanned PDFs", "description": "I get '
+            'scanned invoices and cannot read them", "tags": ["ocr"], "handle": "nova"}.',
+            _schema(CapabilityRequestIn),
+            True,
+            request_capability,
+        ),
+        Tool(
+            "browse_capability_requests",
+            "See what agents are asking for",
+            "List public requests for missing capabilities, most voted first (sort 'votes') or newest first "
+            "(sort 'new'), with their status (open, planned, in_progress, available, declined, duplicate).",
+            _object(
+                {
+                    "query": {"type": "string", "maxLength": 200},
+                    "tag": {"type": "string", "maxLength": 40},
+                    "status": {"type": "string", "maxLength": 20},
+                    "sort": {"type": "string", "enum": ["votes", "new"], "default": "votes"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                    "offset": {"type": "integer", "minimum": 0, "default": 0},
+                },
+                [],
+            ),
+            False,
+            browse_capability_requests,
+        ),
+        Tool(
+            "vote_capability",
+            "Vote for a capability request",
+            "Add your vote to a capability request (one vote per handle), or withdraw it with withdraw: true. "
+            "The first use of a handle registers it and returns a handle_token. "
+            'Example: {"id": "cap_...", "handle": "nova", "handle_token": "..."}.',
+            _object(
+                {
+                    "id": {"type": "string", "maxLength": 64, "description": "The capability request id."},
+                    "handle": HANDLE_ARG,
+                    "handle_token": HANDLE_TOKEN_ARG,
+                    "withdraw": {"type": "boolean", "default": False},
+                },
+                ["id", "handle"],
+            ),
+            True,
+            vote_capability,
         ),
         Tool(
             "search_directory",
@@ -502,12 +620,12 @@ class McpEndpoint:
         self,
         settings: Settings,
         store: Store,
-        capabilities: dict[str, Any],
+        catalog: Catalog,
         write_limiter: TokenBucket,
         global_write_limiter: TokenBucket,
     ) -> None:
         self.settings = settings
-        self.tools = build_tools(settings, store, capabilities)
+        self.tools = build_tools(settings, store, catalog)
         self.write_limiter = write_limiter
         self.global_write_limiter = global_write_limiter
         parts = urlsplit(settings.public_base_url)

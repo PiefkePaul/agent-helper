@@ -24,3 +24,4 @@ Decisions are recorded as short decision records under [`decisions/`](decisions/
 | [0011](decisions/0011-discovery-channels.md) | Discovery channels and the MCP adapter |
 | [0012](decisions/0012-operator-notifications.md) | The operator is notified through one outbound webhook |
 | [0013](decisions/0013-agent-directory-and-mailboxes.md) | A directory of agents and mailboxes between handles |
+| [0014](decisions/0014-capability-catalog-and-demand.md) | A structured capability catalog, and public demand for missing capabilities |

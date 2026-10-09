@@ -112,6 +112,34 @@ CREATE TABLE IF NOT EXISTS mail_blocks (
     PRIMARY KEY (owner_key, blocked_key)
 );
 
+-- Capability catalog entries added by the operator, and requests for missing capabilities. See 0014.
+CREATE TABLE IF NOT EXISTS operator_capabilities (
+    id         TEXT PRIMARY KEY,
+    data       TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS capability_requests (
+    id            TEXT PRIMARY KEY,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    title         TEXT NOT NULL,
+    description   TEXT NOT NULL,
+    tags          TEXT NOT NULL,
+    handle        TEXT,
+    search_text   TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'open'
+                  CHECK (status IN ('open', 'planned', 'in_progress', 'available', 'declined', 'duplicate')),
+    operator_note TEXT,
+    capability_id TEXT,
+    hidden_reason TEXT
+);
+CREATE TABLE IF NOT EXISTS capability_votes (
+    request_id TEXT NOT NULL REFERENCES capability_requests (id),
+    voter_key  TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (request_id, voter_key)
+);
+
 CREATE TRIGGER IF NOT EXISTS board_payloads_no_update BEFORE UPDATE ON board_payloads
 BEGIN SELECT RAISE(ABORT, 'board payloads cannot be changed'); END;
 """
@@ -762,3 +790,156 @@ class Store:
             self._db.execute("UPDATE requests SET status = 'answered' WHERE id = ?", (req_id,))
             row = self._db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
             return self._request_view(row)
+
+    # --- capability catalog and capability requests (docs/decisions/0014) ------------------------
+
+    def list_operator_capabilities(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute("SELECT id, data FROM operator_capabilities ORDER BY id").fetchall()
+        return [json.loads(r["data"]) | {"id": r["id"]} for r in rows]
+
+    def put_operator_capability(self, cap_id: str, data: dict[str, Any]) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO operator_capabilities (id, data, updated_at) VALUES (?, ?, ?)"
+                " ON CONFLICT (id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at",
+                (cap_id, json.dumps(data), now()),
+            )
+
+    def delete_operator_capability(self, cap_id: str) -> bool:
+        with self._lock:
+            return self._db.execute("DELETE FROM operator_capabilities WHERE id = ?", (cap_id,)).rowcount > 0
+
+    def _cap_request_view(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "title": row["title"],
+            "description": row["description"],
+            "tags": json.loads(row["tags"]),
+            "requested_by": row["handle"],
+            "votes": row["votes"],
+            "status": row["status"],
+            "operator_note": row["operator_note"],
+            "capability_id": row["capability_id"],
+        }
+
+    _CAP_REQUEST_SELECT = (
+        "SELECT r.*, (SELECT COUNT(*) FROM capability_votes v WHERE v.request_id = r.id) AS votes"
+        " FROM capability_requests r"
+    )
+
+    def _cap_request(self, req_id: str, include_hidden: bool = False) -> dict[str, Any] | None:
+        hidden = "" if include_hidden else " AND r.hidden_reason IS NULL"
+        row = self._db.execute(f"{self._CAP_REQUEST_SELECT} WHERE r.id = ?{hidden}", (req_id,)).fetchone()  # noqa: S608
+        if row is None:
+            return None
+        view = self._cap_request_view(row)
+        return view | {"hidden_reason": row["hidden_reason"]} if include_hidden else view
+
+    def create_capability_request(
+        self, title: str, description: str, tags: list[str], handle: str | None, handle_token: str | None
+    ) -> tuple[dict[str, Any], str | None]:
+        """Record a request for a missing capability. A handle, if given, also casts the first vote."""
+        req_id, ts = _new_id("cap"), now()
+        with self._tx():
+            new_token = self._claim_handle(handle, handle_token)
+            self._db.execute(
+                "INSERT INTO capability_requests (id, created_at, updated_at, title, description, tags, handle,"
+                " search_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    req_id,
+                    ts,
+                    ts,
+                    title,
+                    description,
+                    json.dumps(tags),
+                    handle,
+                    " ".join([title, description, *tags]).lower(),
+                ),
+            )
+            if handle is not None:
+                self._db.execute(
+                    "INSERT INTO capability_votes (request_id, voter_key, created_at) VALUES (?, ?, ?)",
+                    (req_id, handles.skeleton(handle), ts),
+                )
+            view = self._cap_request(req_id)
+        assert view is not None
+        self._on_event("capability.requested", id=req_id, handle=handle, preview=title)
+        return view, new_token
+
+    def search_capability_requests(
+        self, query: str | None, tag: str | None, status: str | None, sort: str, limit: int, offset: int
+    ) -> list[dict[str, Any]]:
+        where, params = ["r.hidden_reason IS NULL"], []
+        for term in (query or "").lower().split()[:8]:
+            escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            where.append("r.search_text LIKE ? ESCAPE '\\'")
+            params.append(f"%{escaped}%")
+        if tag:
+            where.append("EXISTS (SELECT 1 FROM json_each(r.tags) WHERE value = ?)")
+            params.append(tag)
+        if status:
+            where.append("r.status = ?")
+            params.append(status)
+        order = "votes DESC, r.created_at DESC, r.rowid DESC" if sort == "votes" else "r.created_at DESC, r.rowid DESC"
+        sql = f"{self._CAP_REQUEST_SELECT} WHERE {' AND '.join(where)} ORDER BY {order} LIMIT ? OFFSET ?"  # noqa: S608
+        with self._lock:
+            rows = self._db.execute(sql, (*params, limit, offset)).fetchall()
+            return [self._cap_request_view(r) for r in rows]
+
+    def similar_capability_requests(self, title: str, limit: int = 5) -> list[dict[str, Any]]:
+        """Existing requests that may be the same ask: all title words match, else any longer word matches."""
+        found = self.search_capability_requests(title, None, None, "votes", limit, 0)
+        if not found:
+            for word in [w for w in title.split() if len(w) > 3][:4]:
+                found += self.search_capability_requests(word, None, None, "votes", limit, 0)
+        return list({r["id"]: r for r in found}.values())[:limit]
+
+    def get_capability_request(self, req_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            return self._cap_request(req_id)
+
+    def vote_capability_request(
+        self, req_id: str, handle: str, handle_token: str | None, vote: bool
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Add or withdraw the vote of `handle`. One vote per handle; voting twice changes nothing."""
+        with self._tx():
+            if self._cap_request(req_id) is None:
+                return None, None
+            new_token = self._claim_handle(handle, handle_token)
+            key = handles.skeleton(handle)
+            if vote:
+                self._db.execute(
+                    "INSERT OR IGNORE INTO capability_votes (request_id, voter_key, created_at) VALUES (?, ?, ?)",
+                    (req_id, key, now()),
+                )
+            else:
+                self._db.execute("DELETE FROM capability_votes WHERE request_id = ? AND voter_key = ?", (req_id, key))
+            return self._cap_request(req_id), new_token
+
+    def list_capability_requests_admin(self, status: str | None, limit: int) -> list[dict[str, Any]]:
+        where = "WHERE r.status = ?" if status else ""
+        params: tuple[Any, ...] = (status, limit) if status else (limit,)
+        with self._lock:
+            rows = self._db.execute(
+                f"{self._CAP_REQUEST_SELECT} {where} ORDER BY votes DESC, r.created_at DESC LIMIT ?",  # noqa: S608
+                params,
+            ).fetchall()
+            return [self._cap_request_view(r) | {"hidden_reason": r["hidden_reason"]} for r in rows]
+
+    _DECISION_FIELDS = ("status", "operator_note", "capability_id", "hidden_reason")
+
+    def update_capability_request(self, req_id: str, changes: dict[str, Any]) -> dict[str, Any] | None:
+        """Change only the given fields (status, operator_note, capability_id, hidden_reason)."""
+        assert set(changes) <= set(self._DECISION_FIELDS)
+        assignments = "".join(f"{name} = ?, " for name in changes)
+        with self._lock:
+            cur = self._db.execute(
+                f"UPDATE capability_requests SET {assignments}updated_at = ? WHERE id = ?",  # noqa: S608
+                (*changes.values(), now(), req_id),
+            )
+            if cur.rowcount == 0:
+                return None
+            return self._cap_request(req_id, include_hidden=True)

@@ -13,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 from . import __version__, discovery
+from .catalog import Capability, CapabilityIn, Catalog, load_file_entries
 from .config import Settings
 from .handles import HANDLE_PATTERN, OPERATOR_HANDLE
 from .limits import GuardMiddleware, TokenBucket
@@ -22,6 +23,9 @@ from .models import (
     BoardEntry,
     BoardHead,
     BoardIn,
+    CapabilityDecisionIn,
+    CapabilityRequestIn,
+    CapabilityRequestOut,
     Created,
     HideIn,
     MailIn,
@@ -39,6 +43,7 @@ from .models import (
     RequestIn,
     RequestOut,
     RequestStatus,
+    VoteIn,
 )
 from .notify import Notifier
 from .store import ConversationFull, HandleUnavailable, MailLimits, MailRefused, Store
@@ -70,7 +75,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     notifier = Notifier.from_settings(settings)
     # The hook looks the notifier up on every event so tests can swap its transport.
     store = Store(settings.db_path, on_event=lambda event, **fields: app.state.notifier.emit(event, **fields))
-    capabilities = discovery.load_capabilities(settings)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -87,6 +91,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.notifier = notifier
+    app.state.store = store
     write_limiter = TokenBucket(settings.write_per_minute)
     global_write_limiter = TokenBucket(settings.global_write_per_minute)
     app.add_middleware(
@@ -98,7 +103,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         trust_proxy_headers=settings.trust_proxy_headers,
         self_limited_paths=frozenset({"/mcp"}),
     )
-    mcp = McpEndpoint(settings, store, capabilities, write_limiter, global_write_limiter)
+    catalog = Catalog(load_file_entries(settings), store)
+    mcp = McpEndpoint(settings, store, catalog, write_limiter, global_write_limiter)
 
     @app.exception_handler(HandleUnavailable)
     async def handle_unavailable(_: Request, exc: HandleUnavailable) -> JSONResponse:
@@ -116,6 +122,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     base = settings.public_base_url
     no_store = {"Cache-Control": "no-store"}
+
+    def noindex(response: Response) -> None:
+        # Content written by anyone stays out of search indexes, so it cannot borrow this domain's reputation.
+        response.headers["X-Robots-Tag"] = "noindex, nofollow"
 
     # --- discovery ------------------------------------------------------------------------------
 
@@ -167,9 +177,76 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     v1 = APIRouter(prefix="/v1")
 
-    @v1.get("/capabilities", tags=["discovery"])
-    def get_capabilities() -> dict[str, Any]:
-        return capabilities
+    @v1.get("/capabilities", tags=["capabilities"])
+    def get_capabilities(
+        q: Annotated[str | None, Query(max_length=200)] = None,
+        category: Annotated[str | None, Query(max_length=40)] = None,
+        availability: Annotated[str | None, Query(max_length=40)] = None,
+        tag: Annotated[str | None, Query(max_length=40)] = None,
+    ) -> dict[str, Any]:
+        return catalog.search(q, category, availability, tag)
+
+    @v1.get("/capabilities/{cap_id}", tags=["capabilities"])
+    def get_capability(cap_id: Annotated[str, Path(max_length=64)]) -> Capability:
+        found = catalog.get(cap_id)
+        if found is None:
+            raise HTTPException(404, "no such capability")
+        return found
+
+    # --- capability requests (docs/decisions/0014) -----------------------------------------------
+
+    @v1.post("/capability-requests", status_code=201, tags=["capabilities"])
+    def create_capability_request(body: CapabilityRequestIn) -> JSONResponse:
+        similar = store.similar_capability_requests(body.title)
+        created, handle_token = store.create_capability_request(
+            body.title, body.description, body.tags, body.handle, body.handle_token
+        )
+        out: dict[str, Any] = CapabilityRequestOut(**created).model_dump()
+        out["similar"] = [CapabilityRequestOut(**r).model_dump() for r in similar]
+        out["note"] = (
+            "Recorded publicly. If one of 'similar' is the same ask, vote on it instead: "
+            "POST /v1/capability-requests/{id}/votes."
+        )
+        if handle_token:
+            out |= {"handle_token": handle_token, "note": out["note"] + HANDLE_NOTE}
+        return JSONResponse(out, status_code=201, headers=no_store if handle_token else None)
+
+    @v1.get("/capability-requests", tags=["capabilities"], dependencies=[Depends(noindex)])
+    def list_capability_requests(
+        q: Annotated[str | None, Query(max_length=200)] = None,
+        tag: Annotated[str | None, Query(max_length=40)] = None,
+        status: Annotated[str | None, Query(max_length=20)] = None,
+        sort: Literal["votes", "new"] = "votes",
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
+    ) -> dict[str, Any]:
+        found = store.search_capability_requests(q, tag, status, sort, limit, offset)
+        items = [CapabilityRequestOut(**r).model_dump() for r in found]
+        return {"requests": items, "next_offset": offset + len(items) if len(items) == limit else None}
+
+    @v1.get("/capability-requests/{req_id}", tags=["capabilities"], dependencies=[Depends(noindex)])
+    def get_capability_request(req_id: Annotated[str, Path(max_length=64)]) -> CapabilityRequestOut:
+        found = store.get_capability_request(req_id)
+        if found is None:
+            raise HTTPException(404, "no such capability request")
+        return CapabilityRequestOut(**found)
+
+    @v1.post("/capability-requests/{req_id}/votes", tags=["capabilities"])
+    def vote(req_id: Annotated[str, Path(max_length=64)], body: VoteIn) -> JSONResponse:
+        return _vote(req_id, body, True)
+
+    @v1.post("/capability-requests/{req_id}/votes/withdraw", tags=["capabilities"])
+    def withdraw_vote(req_id: Annotated[str, Path(max_length=64)], body: VoteIn) -> JSONResponse:
+        return _vote(req_id, body, False)
+
+    def _vote(req_id: str, body: VoteIn, add: bool) -> JSONResponse:
+        found, handle_token = store.vote_capability_request(req_id, body.handle, body.handle_token, add)
+        if found is None:
+            raise HTTPException(404, "no such capability request")
+        out = CapabilityRequestOut(**found).model_dump()
+        if handle_token:
+            out |= {"handle_token": handle_token, "note": HANDLE_NOTE.strip()}
+        return JSONResponse(out, headers=no_store if handle_token else None)
 
     # --- requests -------------------------------------------------------------------------------
 
@@ -230,10 +307,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return ReportOut(**found)
 
     # --- board ----------------------------------------------------------------------------------
-
-    def noindex(response: Response) -> None:
-        # Board content is written by anyone; keep it out of search indexes so it cannot borrow this domain.
-        response.headers["X-Robots-Tag"] = "noindex, nofollow"
 
     @v1.get("/board", tags=["board"], dependencies=[Depends(noindex)])
     def list_board(
@@ -421,6 +494,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not store.set_profile_hidden(handle, None):
             raise HTTPException(404, "no such profile")
         return {"hidden": False}
+
+    @admin.put("/capabilities/{cap_id}")
+    def admin_put_capability(
+        cap_id: Annotated[str, Path(max_length=64, pattern=r"^[a-z0-9][a-z0-9-]*$")], body: CapabilityIn
+    ) -> Capability:
+        store.put_operator_capability(cap_id, body.model_dump())
+        return catalog.get(cap_id)  # type: ignore[return-value]
+
+    @admin.delete("/capabilities/{cap_id}", status_code=204)
+    def admin_delete_capability(cap_id: str) -> Response:
+        if not store.delete_operator_capability(cap_id):
+            raise HTTPException(404, "no operator entry with this id (catalog file entries cannot be deleted here)")
+        return Response(status_code=204)
+
+    @admin.get("/capability-requests")
+    def admin_capability_requests(
+        status: str | None = None, limit: Annotated[int, Query(ge=1, le=500)] = 100
+    ) -> list[dict[str, Any]]:
+        return store.list_capability_requests_admin(status, limit)
+
+    @admin.post("/capability-requests/{req_id}/decision")
+    def admin_decide_capability_request(req_id: str, body: CapabilityDecisionIn) -> dict[str, Any]:
+        sent = body.model_fields_set
+        if body.capability_id is not None and catalog.get(body.capability_id) is None:
+            raise HTTPException(422, "capability_id does not name a catalog entry")
+        if "status" in sent and body.status is None:
+            raise HTTPException(422, "status cannot be null")
+        names = {"status": "status", "note": "operator_note", "capability_id": "capability_id"}
+        changes = {column: getattr(body, field) for field, column in names.items() if field in sent}
+        return _update_capability_request(req_id, changes)
+
+    @admin.post("/capability-requests/{req_id}/hide")
+    def admin_hide_capability_request(req_id: str, body: HideIn) -> dict[str, Any]:
+        return _update_capability_request(req_id, {"hidden_reason": body.reason})
+
+    @admin.post("/capability-requests/{req_id}/unhide")
+    def admin_unhide_capability_request(req_id: str) -> dict[str, Any]:
+        return _update_capability_request(req_id, {"hidden_reason": None})
+
+    def _update_capability_request(req_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+        found = store.update_capability_request(req_id, changes)
+        if found is None:
+            raise HTTPException(404, "no such capability request")
+        return found
 
     @admin.get("/reports")
     def admin_reports(
