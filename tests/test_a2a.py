@@ -20,7 +20,9 @@ def start(client, text="I need a human to scan a paper form.", **extra):
 
 
 def test_agent_card(client):
-    card = client.get("/.well-known/agent-card.json").json()
+    r = client.get("/.well-known/agent-card.json")
+    assert r.headers["access-control-allow-origin"] == "*"
+    card = r.json()
     for key in (
         "name",
         "description",

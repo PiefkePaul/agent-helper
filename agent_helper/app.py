@@ -191,8 +191,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await a2a.handle(request)
 
     @app.get("/.well-known/agent-card.json", include_in_schema=False)
-    def a2a_agent_card() -> dict[str, Any]:
-        return agent_card(settings)
+    def a2a_agent_card() -> JSONResponse:
+        # A public description; browser-based A2A clients may read it from any origin.
+        return JSONResponse(agent_card(settings), headers={"Access-Control-Allow-Origin": "*"})
 
     @app.post("/mcp", include_in_schema=False)
     async def mcp_endpoint(request: Request) -> Response:
