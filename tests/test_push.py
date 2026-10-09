@@ -284,7 +284,7 @@ def _body(kind: str = "notice", **changes) -> str:
         body = {"type": "push.verify", "code": "abc", "about": "a check", "confirm": "POST /v1/x"}
     else:
         body = {"type": "notice", "count": 1, "events": [{"event": "mail.received", "id": 7}]}
-    return json.dumps(common | body | changes)
+    return json.dumps(common | body | changes, separators=(",", ":"))
 
 
 EVT = "evt_" + "a" * 24
@@ -333,10 +333,8 @@ def test_relay_never_sends_headers_from_jobs(tmp_path):
     assert "Authorization" not in sent and "Host" not in sent
     for bad in ({"event_id": "evt_x\r\nX: y"}, {"timestamp": "12a"}, {"signature": "sha256=zz"}):
         body = json.dumps({"jobs": [_job() | bad]}).encode()
-        assert (
-            client.post("/v1/relay/jobs", content=body, headers=_signed("POST", "/v1/relay/jobs", body)).status_code
-            == 400
-        )
+        response = client.post("/v1/relay/jobs", content=body, headers=_signed("POST", "/v1/relay/jobs", body))
+        assert response.json() == {"accepted": 0, "refused": 1}
 
 
 @pytest.mark.parametrize(
@@ -359,13 +357,29 @@ def test_relay_never_sends_headers_from_jobs(tmp_path):
         {"body": _body(handle="\u00e9")},
         {"body": _body(time="yesterday")},
         {"body": _body("verify")},  # a verification body in a notice job
+        {"body": _body().replace(",", ", ")},  # padding
+        {"body": _body().replace('"count":1', '"count":1,"count":2')},  # duplicate key
+        {"body": _body().replace('"nova"', '"\\u006eova"')},  # another escape for the same text
+        {"body": _body(count=10_001)},
     ],
 )
 def test_relay_accepts_only_strict_jobs(tmp_path, changes):
-    client, _ = _relay_client(tmp_path)
+    client, sender = _relay_client(tmp_path)
     body = json.dumps({"jobs": [_job() | changes]}).encode()
     signed = _signed("POST", "/v1/relay/jobs", body)
-    assert client.post("/v1/relay/jobs", content=body, headers=signed).status_code == 400
+    assert client.post("/v1/relay/jobs", content=body, headers=signed).json() == {"accepted": 0, "refused": 1}
+    sender.run_due()
+    assert sender.post.calls == []
+
+
+def test_one_bad_job_does_not_block_the_others(tmp_path):
+    client, sender = _relay_client(tmp_path)
+    jobs = [_job(1), _job(2) | {"body": "padded "}, "not a job", _job(3, url="https://b.example.org/x")]
+    body = json.dumps({"jobs": jobs}).encode()
+    response = client.post("/v1/relay/jobs", content=body, headers=_signed("POST", "/v1/relay/jobs", body))
+    assert response.json() == {"accepted": 2, "refused": 2}
+    sender.run_due()
+    assert _outcomes(sender) == {"job_1": "delivered", "job_2": "refused", "job_3": "delivered"}
 
 
 def test_relay_accepts_every_body_the_service_builds(pushing):
@@ -582,7 +596,7 @@ def test_relay_api_requires_a_fresh_valid_signature(tmp_path):
     other_path = _signed("POST", "/v1/relay/outcomes", body)
     assert client.post("/v1/relay/jobs", content=body, headers=other_path).status_code == 401
     good = _signed("POST", "/v1/relay/jobs", body)
-    assert client.post("/v1/relay/jobs", content=body, headers=good).json() == {"accepted": 1}
+    assert client.post("/v1/relay/jobs", content=body, headers=good).json() == {"accepted": 1, "refused": 0}
     assert client.post("/v1/relay/jobs", content=body, headers=good).status_code == 401  # replay
     sender.run_due()
     out = client.get("/v1/relay/outcomes?after=0", headers=_signed("GET", "/v1/relay/outcomes?after=0"))
@@ -592,8 +606,12 @@ def test_relay_api_requires_a_fresh_valid_signature(tmp_path):
 
 def test_relay_api_validates_jobs(tmp_path):
     client, _ = _relay_client(tmp_path)
-    for jobs in ([{"job_id": "x"}], [_job() | {"body": "x" * 2000}], [_job() | {"kind": "other"}], [_job()] * 51):
+    for jobs in ([{"job_id": "x"}], [_job() | {"body": "x" * 2000}], [_job() | {"kind": "other"}]):
         body = json.dumps({"jobs": jobs}).encode()
+        response = client.post("/v1/relay/jobs", content=body, headers=_signed("POST", "/v1/relay/jobs", body))
+        assert response.json() == {"accepted": 0, "refused": 1}
+    for data in ({"jobs": [_job()] * 51}, {"jobs": "x"}, []):
+        body = json.dumps(data).encode()
         assert (
             client.post("/v1/relay/jobs", content=body, headers=_signed("POST", "/v1/relay/jobs", body)).status_code
             == 400

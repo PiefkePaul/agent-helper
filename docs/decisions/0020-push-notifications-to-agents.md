@@ -175,7 +175,9 @@ providers are recorded in this repository.
   The relay accepts no header names from jobs: it builds the request headers itself from a fixed set, so
   even a compromised service cannot make it send `Authorization`, `Host` or other headers. The values are
   checked as whole strings of ASCII characters, and the body must be JSON with exactly the fields of its
-  notice type (step 4), so the relay cannot be made to send other content either. The opt-out
+  notice type (step 4), in exactly the compact form the service writes (no padding, no duplicate
+  keys), so the relay cannot be made to send other content either. A job that fails these checks is
+  reported back as `refused` on its own; the other jobs of the same call go ahead. The opt-out
   list applies to every job, not only to verifications. Every call from the service to the relay has one
   overall deadline, so a slow relay cannot stall the service's push thread. Outcomes come back as one of `delivered`,
   `failed`, `tls_failure`, `opted_out`, `refused` (destination checks) or `capped`. Nothing else crosses

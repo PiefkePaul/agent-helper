@@ -88,6 +88,34 @@ def _short(value: Any) -> bool:
     return _matches(SHORT_TEXT, value)
 
 
+MAX_COUNT = 10_000
+
+
+def canonical_json(value: Any) -> str:
+    """The one serialisation the service uses for notice bodies, and the only one the relay accepts."""
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=True)
+
+
+def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate key")
+    return dict(pairs)
+
+
+def valid_job(job: Any) -> bool:
+    return (
+        isinstance(job, dict)
+        and _matches(JOB_ID, job.get("job_id"))
+        and job.get("kind") in ("verify", "notice")
+        and isinstance(job.get("url"), str)
+        and _matches(EVENT_ID, job.get("event_id"))
+        and _matches(TIMESTAMP, job.get("timestamp"))
+        and _matches(SIGNATURE, job.get("signature"))
+        and valid_body(job)
+    )
+
+
 def valid_body(job: dict[str, Any]) -> bool:
     """The notice body is JSON with a fixed set of fields for its type, matching the job. Anything else is
     refused, so the relay cannot be used to send arbitrary content."""
@@ -95,10 +123,11 @@ def valid_body(job: dict[str, Any]) -> bool:
     if not isinstance(raw, str) or len(raw) > 1024 or not raw.isascii():
         return False
     try:
-        body = json.loads(raw)
+        body = json.loads(raw, object_pairs_hook=_no_duplicates)
     except ValueError:
         return False
-    if not isinstance(body, dict):
+    # Only the exact form the service writes: no padding, no duplicate keys, no alternative escapes.
+    if not isinstance(body, dict) or canonical_json(body) != raw:
         return False
     kind = body.get("type")
     if kind not in BODY_FIELDS or set(body) != BODY_FIELDS[kind] or BODY_KIND[kind] != job.get("kind"):
@@ -116,7 +145,7 @@ def valid_body(job: dict[str, Any]) -> bool:
     return (
         isinstance(count, int)
         and not isinstance(count, bool)
-        and count >= 1
+        and 1 <= count <= MAX_COUNT
         and isinstance(events, list)
         and len(events) <= 10
         and all(
@@ -248,6 +277,9 @@ class Sender:
         if self.autostart:
             self._start()
         return accepted
+
+    def refuse(self, job_id: str) -> None:
+        self._record({"job_id": job_id, "kind": "invalid"}, "refused")
 
     def outcomes(self, after: int, limit: int = 500) -> tuple[list[dict[str, Any]], int]:
         with self._lock:
@@ -449,21 +481,17 @@ def create_relay_app(settings: RelaySettings, sender: Sender | None = None) -> F
         items = data.get("jobs") if isinstance(data, dict) else None
         if not isinstance(items, list) or len(items) > MAX_JOBS_PER_CALL:
             raise HTTPException(400, f"send 'jobs', a list of at most {MAX_JOBS_PER_CALL}")
-        valid = []
+        # One bad job must not hold up the others: it is reported as refused (when it has a usable id)
+        # and the rest go ahead.
+        valid, refused = [], 0
         for job in items:
-            if not (
-                isinstance(job, dict)
-                and _matches(JOB_ID, job.get("job_id"))
-                and job.get("kind") in ("verify", "notice")
-                and isinstance(job.get("url"), str)
-                and _matches(EVENT_ID, job.get("event_id"))
-                and _matches(TIMESTAMP, job.get("timestamp"))
-                and _matches(SIGNATURE, job.get("signature"))
-                and valid_body(job)
-            ):
-                raise HTTPException(400, "invalid job")
-            valid.append(job)
-        return JSONResponse({"accepted": sender.submit(valid)})
+            if valid_job(job):
+                valid.append(job)
+                continue
+            refused += 1
+            if isinstance(job, dict) and _matches(JOB_ID, job.get("job_id")):
+                sender.refuse(job["job_id"])
+        return JSONResponse({"accepted": sender.submit(valid), "refused": refused})
 
     @app.get("/v1/relay/outcomes")
     async def outcomes(request: Request, after: int = 0) -> JSONResponse:

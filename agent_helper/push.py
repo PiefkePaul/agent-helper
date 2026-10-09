@@ -29,7 +29,7 @@ from urllib.parse import urlsplit
 
 from .config import Settings
 from .pushcheck import Destination, DestinationRefused, check_url, parse_list
-from .relay import MAX_JOBS_PER_CALL, OUTCOMES, sign
+from .relay import MAX_COUNT, MAX_JOBS_PER_CALL, OUTCOMES, canonical_json, sign
 from .store import PUSH_EVENTS, MailLimits, Store
 
 log = logging.getLogger("agent_helper.push")
@@ -59,7 +59,7 @@ def notice_signature(secret: str, timestamp: str, event_id: str, body: bytes) ->
 
 def signed_job(kind: str, url: str, secret: str, payload: dict[str, Any]) -> dict[str, Any]:
     event_id = payload["event_id"]
-    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
+    body = canonical_json(payload)
     if len(body) > MAX_BODY:
         raise ValueError("notice body too large")
     timestamp = str(int(time.time()))
@@ -226,7 +226,11 @@ class PushManager:
             self._queue(sub, "verify", self._payload(sub, "push.verify", extra))
         for sub in self.store.push_take_due(now):
             events = sub["pending_events"]
-            self._queue(sub, "notice", self._payload(sub, "notice", {"count": sub["pending_count"], "events": events}))
+            self._queue(
+                sub,
+                "notice",
+                self._payload(sub, "notice", {"count": min(sub["pending_count"], MAX_COUNT), "events": events}),
+            )
         self._flush(now)
         self._collect(now)
 
