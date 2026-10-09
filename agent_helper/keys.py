@@ -23,6 +23,7 @@ import base64
 import binascii
 import functools
 import hashlib
+from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
@@ -170,6 +171,18 @@ def checkpoint_statement(instance: str, seq: int, entry_hash: str, time: str) ->
     return canonical_json(
         {"purpose": "agent-helper/checkpoint", "instance": instance, "seq": seq, "entry_hash": entry_hash, "time": time}
     )
+
+
+def read_private_key_file(path: Path) -> str:
+    """An Ed25519 private key from a file: 64 hex characters (32 raw bytes), whitespace ignored."""
+    try:
+        text = path.read_text("ascii").strip()
+        raw = bytes.fromhex(text)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"INSTANCE_SIGNING_KEY_FILE cannot be read as a hex key: {type(exc).__name__}") from None
+    if len(raw) != 32:
+        raise SystemExit("INSTANCE_SIGNING_KEY_FILE must hold 64 hex characters (an Ed25519 private key)")
+    return raw.hex()
 
 
 def new_private_key() -> str:

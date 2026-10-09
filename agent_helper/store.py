@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 import sqlite3
 import threading
@@ -17,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from . import board, handles, keys
+
+log = logging.getLogger("agent_helper.store")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
@@ -335,9 +338,16 @@ class Store:
     (used for operator notifications, docs/decisions/0012). It must not block or raise.
     """
 
-    def __init__(self, path: Path, on_event: EventHook = _no_events, checkpoint_seconds: int = 3600) -> None:
+    def __init__(
+        self,
+        path: Path,
+        on_event: EventHook = _no_events,
+        checkpoint_seconds: int = 3600,
+        signing_key_file: Path | None = None,
+    ) -> None:
         self._on_event = on_event
         self._checkpoint_seconds = checkpoint_seconds
+        self.clock_behind = False  # set while the clock is earlier than the last checkpoint
         self._last_mail_purge = -1e9
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -355,9 +365,21 @@ class Store:
         self.instance = self._meta("instance_id", lambda: "ah-" + secrets.token_hex(16))
         self._challenge_key = bytes.fromhex(self._meta("challenge_key", lambda: secrets.token_hex(32)))
         # The instance's own signing key, for board checkpoints (docs/decisions/0022).
-        self._signing_key = self._meta("signing_key", keys.new_private_key)
+        db_key = self._meta("signing_key", keys.new_private_key)
+        self._signing_key = keys.read_private_key_file(signing_key_file) if signing_key_file else db_key
         self.public_key = keys.public_key_of(self._signing_key)
         self.key_id = keys.key_id(self.public_key)
+        # Keys this database signed with before (the database key when a key file is used, and the key
+        # before `maintenance new-instance-id`), so verifiers can tell "rotated" from "forged".
+        self.other_keys = {}
+        for private in (db_key, self._meta_value("previous_signing_key")):
+            if private and private != self._signing_key:
+                public = keys.public_key_of(private)
+                self.other_keys[keys.key_id(public)] = public
+
+    def _meta_value(self, name: str) -> str | None:
+        row = self._db.execute("SELECT value FROM instance_meta WHERE name = ?", (name,)).fetchone()
+        return row["value"] if row else None
 
     def _meta(self, name: str, make: Callable[[], str]) -> str:
         """A value stored once per database; created on first use."""
@@ -805,8 +827,13 @@ class Store:
         if last is None:
             return True
         age = time.time() - datetime.strptime(last["time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
-        # A clock that stepped back (negative age) must not stop checkpoints until it catches up.
-        return last["seq"] < head["seq"] and (age < 0 or age >= self._checkpoint_seconds)
+        # Checkpoint times only move forward: while the clock is earlier than the last checkpoint, none is
+        # recorded, and the operator is warned (log and console).
+        behind = age < 0
+        if behind and not self.clock_behind:
+            log.warning("the clock is earlier than the last board checkpoint; no new checkpoints until it catches up")
+        self.clock_behind = behind
+        return last["seq"] < head["seq"] and not behind and age >= self._checkpoint_seconds
 
     def _checkpoint_if_due(self) -> None:
         """Record a signed checkpoint of the head if one is due. Must run inside `_tx`."""

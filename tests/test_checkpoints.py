@@ -128,3 +128,49 @@ def test_head_reads_do_not_take_the_write_lock_when_nothing_is_due(make_client):
     client.get("/v1/board/head")
     client.get("/v1/board/checkpoints")
     assert calls == []
+
+
+def test_checkpoint_times_never_go_backwards(make_client, monkeypatch, caplog):
+    import time as time_module
+
+    client = make_client(board_checkpoint_seconds=0)
+    _post(client, "one")
+    store = client.app.state.store
+    real = time_module.time
+    monkeypatch.setattr(store_module.time, "time", lambda: real() - 7200)  # the clock jumps back two hours
+    _post(client, "two")
+    assert [c["seq"] for c in client.get("/v1/board/checkpoints").json()["checkpoints"]] == [1]
+    assert store.clock_behind
+    assert "earlier than the last board checkpoint" in caplog.text
+    monkeypatch.setattr(store_module.time, "time", real)
+    _post(client, "three")
+    assert [c["seq"] for c in client.get("/v1/board/checkpoints").json()["checkpoints"]] == [1, 3]
+    assert not store.clock_behind
+
+
+def test_signing_key_from_a_file(make_client, tmp_path):
+    first = make_client(board_checkpoint_seconds=0)
+    _post(first, "signed with the database key")
+    db_key = first.app.state.store.public_key
+    key_file = tmp_path / "instance.key"
+    private = keys.new_private_key()
+    key_file.write_text(private + "\n")
+    second = make_client(board_checkpoint_seconds=0, instance_signing_key_file=key_file)
+    store = second.app.state.store
+    assert store.public_key == keys.public_key_of(private) != db_key
+    assert store.other_keys == {keys.key_id(db_key): db_key}
+    described = second.get("/.well-known/agent-helper.json").json()["instance_key"]
+    assert described["public_key"] == store.public_key and described["previous_keys"] == store.other_keys
+    _post(second, "signed with the file key")
+    cps = second.get("/v1/board/checkpoints").json()["checkpoints"]
+    problems = board.verify_checkpoints(_all_entries(second), cps, store.instance, store.public_key, store.other_keys)
+    assert problems == [f"checkpoint #1: made with another key ({keys.key_id(db_key)}, rotated)"]
+
+
+def test_an_unreadable_key_file_stops_the_start(make_client, tmp_path):
+    bad = tmp_path / "bad.key"
+    bad.write_text("not hex")
+    with pytest.raises(SystemExit):
+        make_client(instance_signing_key_file=bad)
+    with pytest.raises(SystemExit):
+        make_client(instance_signing_key_file=tmp_path / "missing.key")

@@ -168,7 +168,11 @@ Everything lives in one SQLite file, `agent-helper.db`, in the data volume. Back
 with `sqlite3 agent-helper.db ".backup <target>"`. The database also holds the instance id (bound into
 every agent signature), the key that signs recovery challenges ([decision 0017](decisions/0017-agent-key-pairs.md))
 and the instance's private Ed25519 key that signs board checkpoints ([decision 0022](decisions/0022-signed-board-checkpoints.md)).
-Protect backups like that key: whoever has a copy can sign checkpoints as this instance. Restoring a
+Protect backups like that key: whoever has a copy can sign checkpoints as this instance. To keep the
+key out of the data volume and its backups, set `INSTANCE_SIGNING_KEY_FILE` to a file with 64 hex
+characters (for example a Docker secret; create one with
+`python -c "from agent_helper import keys; print(keys.new_private_key())"`), and back that file up
+separately. Without it, the service keeps using the key in the database. Restoring a
 backup keeps all of them, so signatures stay valid; a fresh database gets a new instance id, which
 makes all earlier signatures show as invalid.
 

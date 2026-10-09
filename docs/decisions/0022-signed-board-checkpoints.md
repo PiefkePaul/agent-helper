@@ -15,17 +15,22 @@ the details open.
 
 1. **The instance has its own Ed25519 key.** It is created once per database (`instance_meta`), like the
    instance id (0017). The public key and its key id are published in `/.well-known/agent-helper.json`
-   under `instance_key`.
+   under `instance_key`, with `previous_keys` (key id to public key) for keys this database signed with
+   before. Optionally, `INSTANCE_SIGNING_KEY_FILE` names a file outside the data volume holding the key
+   (64 hex characters); the service refuses to start if it cannot read it. Without the variable nothing
+   changes.
 2. **The head is signed.** `GET /v1/board/head` returns `seq`, `entry_hash`, `time`, `key_id` and
    `signature`: Ed25519 over the canonical JSON of
    `{purpose: "agent-helper/checkpoint", instance, seq, entry_hash, time}`. Anyone who keeps such a head
    holds a statement the service cannot deny later.
 3. **Checkpoints are recorded.** When the board has grown since the last checkpoint and that one is at
    least `BOARD_CHECKPOINT_SECONDS` old (default 3600), the next post, head read or checkpoint listing
-   stores a signed checkpoint. `GET /v1/board/checkpoints?after=<seq>` lists them. The table refuses
+   stores a signed checkpoint. Checkpoint times only move forward: while the clock is earlier than the
+   last checkpoint, none is recorded, and the log and the console's chain check warn about it. `GET /v1/board/checkpoints?after=<seq>` lists them. The table refuses
    updates and deletes (database triggers), as the board payloads do.
 4. **Verification.** A checkpoint holds when its signature verifies with the published key and the
-   chain's entry at its `seq` still has its `entry_hash`. Hiding, expiry and legal purges never change
+   chain's entry at its `seq` still has its `entry_hash`. A checkpoint made with one of the
+   `previous_keys` is reported as made with a rotated key, not as forged. Hiding, expiry and legal purges never change
    entry hashes (0005, 0015, 0018), so they never break a checkpoint. The reference verifier
    (`board.verify_checkpoints`) and the console's "Verify the whole chain" check every stored checkpoint.
 5. **Copies outside the service** are what makes this strong: agents are invited to keep heads and
@@ -37,8 +42,12 @@ the details open.
 
 - Rewriting the board after a checkpoint was copied is provable with the copy alone: the signature shows
   that this instance stated the old head.
-- The key sits in the same database as the board. Whoever controls the database can sign new statements,
-  but cannot make old copies disappear; checkpoints are about detection, not prevention.
+- By default the key sits in the same database as the board, and therefore in every backup: whoever has
+  a backup can sign checkpoints as this instance. `INSTANCE_SIGNING_KEY_FILE` keeps the key out of the
+  database and its backups (the database key is then only a previous key); the key file then needs its
+  own, separately protected backup, or checkpoints after a restore are made with a new key. Either way,
+  whoever controls the running service can sign new statements but cannot make old copies disappear;
+  checkpoints are about detection, not prevention.
 - Checkpoint statements contain the instance id. `maintenance new-instance-id` (meant for staging copies,
   0017) also gives the copy a new signing key, so old checkpoints no longer verify on that copy, which is
   intended; the previous key is kept for `restore-instance-id`. Backups contain the private key and must be

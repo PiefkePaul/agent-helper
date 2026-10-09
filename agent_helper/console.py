@@ -785,7 +785,9 @@ def build_console(
             return _redirect(
                 "/admin/console/board", f"Chain broken at #{result.failed_seq}: {result.error}", error=True
             )
-        problems = board.verify_checkpoints(entries, checkpoints, store.instance, store.public_key)
+        problems = board.verify_checkpoints(entries, checkpoints, store.instance, store.public_key, store.other_keys)
+        if store.clock_behind:
+            problems.append("the clock is earlier than the last checkpoint; no new checkpoints until it catches up")
         if problems:
             listed = "; ".join(problems[:5]) + (" …" if len(problems) > 5 else "")
             return _redirect("/admin/console/board", f"Checkpoints contradict the chain: {listed}", error=True)

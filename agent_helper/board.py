@@ -132,17 +132,24 @@ def verify_checkpoints(
     checkpoints: Iterable[Mapping[str, Any]],
     instance: str,
     public_key: str,
+    other_keys: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Problems with signed checkpoints (docs/decisions/0022): a bad signature, or a checkpoint whose
     entry_hash differs from the chain's entry at that seq (the chain was rewritten after it was signed).
-    `entries` as returned by GET /v1/board; an empty list means every checkpoint holds."""
+    `entries` as returned by GET /v1/board; an empty list means every checkpoint holds. `other_keys`
+    (key id -> public key) are earlier keys of this instance: a checkpoint signed with one of them is
+    reported as made with a rotated key, not as forged."""
     from . import keys  # keys imports this module
 
     hashes = {e["seq"]: e["entry_hash"] for e in entries}
+    current_id = keys.key_id(public_key)
     problems = []
     for cp in checkpoints:
         statement = keys.checkpoint_statement(instance, cp["seq"], cp["entry_hash"], cp["time"])
-        if not keys.verify(public_key, cp["signature"], statement):
+        old_key = (other_keys or {}).get(cp.get("key_id", current_id)) if cp.get("key_id") != current_id else None
+        if old_key is not None and keys.verify(old_key, cp["signature"], statement):
+            problems.append(f"checkpoint #{cp['seq']}: made with another key ({cp['key_id']}, rotated)")
+        elif not keys.verify(public_key, cp["signature"], statement):
             problems.append(f"checkpoint #{cp['seq']}: signature does not verify")
         elif cp["seq"] not in hashes:
             problems.append(f"checkpoint #{cp['seq']}: the chain has no such entry")
