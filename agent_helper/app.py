@@ -108,6 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         trust_proxy_headers=settings.trust_proxy_headers,
         self_limited_paths=frozenset({"/mcp"}),
         admin_networks=parse_networks(settings.admin_allowed_nets),
+        trusted_proxies=parse_networks(settings.trusted_proxies) or (),
     )
     catalog = Catalog(load_file_entries(settings), store)
     mcp = McpEndpoint(settings, store, catalog, write_limiter, global_write_limiter)

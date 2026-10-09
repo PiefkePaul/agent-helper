@@ -40,8 +40,11 @@ browser.
    the most recent 500 log lines of the process (the same minimal lines as decision 0008: no bodies,
    tokens or addresses).
 6. **Exposure.** The app itself answers `/admin/` (API and console) only for clients in
-   `ADMIN_ALLOWED_NETS` (default: loopback and private networks; `any` turns the check off); everyone else
-   gets `404`. With `TRUST_PROXY_HEADERS` the address forwarded by the proxy is checked. The reverse proxy
+   `ADMIN_ALLOWED_NETS` (default: loopback only; `any` turns the check off); everyone else gets `404`.
+   The client is the socket peer. Only if that peer is in `TRUSTED_PROXIES` (default: none) is
+   `X-Forwarded-For` read, from the right, and the first address that is not a trusted proxy counts; a
+   trusted proxy without a usable header means deny. An invalid entry in either list denies everyone.
+   This check is separate from `TRUST_PROXY_HEADERS`, which only affects rate limits. The reverse proxy
    should restrict `/admin/` as well (SSH tunnel or VPN, ideally with a second factor), as for the admin
    API (0009).
 

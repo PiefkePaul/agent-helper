@@ -229,26 +229,66 @@ def test_flash_messages_expire(console, monkeypatch):
     assert "Not delivered" not in client.get(link).text
 
 
-def test_admin_is_limited_to_allowed_networks(make_client):
-    client = make_client(admin_allowed_nets="10.0.0.0/8", trust_proxy_headers=True)
-    auth = {"Authorization": f"Bearer {ADMIN_SECRET}"}
-    outside = {"X-Forwarded-For": "203.0.113.7"}
-    inside = {"X-Forwarded-For": "10.1.2.3"}
-    assert client.get("/admin/v1/requests", headers={**auth, **outside}).status_code == 404
-    assert client.get("/admin/login", headers=outside).status_code == 404
-    assert client.get("/admin/v1/requests", headers={**auth, **inside}).status_code == 200
-    assert client.get("/admin/login", headers=inside).status_code == 200
-    # Public routes are unaffected.
-    assert client.get("/llms.txt", headers=outside).status_code == 200
+PUBLIC = "203.0.113.7"
+PROXY = "172.18.0.5"  # a reverse proxy on the container network
 
 
-def test_default_admin_nets_are_private_only():
+def _admin(client, **headers):
+    return client.get("/admin/v1/requests", headers={"Authorization": f"Bearer {ADMIN_SECRET}", **headers}).status_code
+
+
+def test_default_allows_only_loopback(make_client):
+    assert _admin(make_client(peer="127.0.0.1", admin_allowed_nets="127.0.0.0/8,::1/128")) == 200
+    for peer in (PUBLIC, PROXY, "192.168.1.5", "::ffff:10.0.0.1"):
+        client = make_client(peer=peer, admin_allowed_nets="127.0.0.0/8,::1/128")
+        assert _admin(client) == 404
+        assert client.get("/admin/login").status_code == 404
+        assert client.get("/llms.txt").status_code == 200  # public routes are unaffected
+
+
+def test_through_a_trusted_proxy_the_forwarded_client_counts(make_client):
+    client = make_client(peer=PROXY, admin_allowed_nets="10.0.0.0/8", trusted_proxies="172.18.0.0/16")
+    assert _admin(client, **{"X-Forwarded-For": "10.1.2.3"}) == 200
+    assert _admin(client, **{"X-Forwarded-For": PUBLIC}) == 404
+
+
+def test_bypass_1_private_proxy_peer_without_trusted_proxies(make_client):
+    # A proxy on a private network forwards a public client. Without TRUSTED_PROXIES the peer (the proxy)
+    # counts, and it is not in the allowed list by default.
+    client = make_client(peer=PROXY, admin_allowed_nets="127.0.0.0/8,::1/128")
+    assert _admin(client, **{"X-Forwarded-For": PUBLIC}) == 404
+
+
+def test_bypass_2_forged_header_from_an_untrusted_peer(make_client):
+    client = make_client(peer=PUBLIC, admin_allowed_nets="127.0.0.0/8,10.0.0.0/8", trusted_proxies="172.18.0.0/16")
+    assert _admin(client, **{"X-Forwarded-For": "127.0.0.1"}) == 404
+    assert _admin(client, **{"X-Forwarded-For": "10.0.0.1"}) == 404
+
+
+def test_bypass_3_forged_left_entries_through_a_trusted_proxy(make_client):
+    client = make_client(peer=PROXY, admin_allowed_nets="127.0.0.0/8", trusted_proxies="172.18.0.0/16")
+    # The client prepends a loopback address; the proxy appends the real one.
+    assert _admin(client, **{"X-Forwarded-For": f"127.0.0.1, {PUBLIC}"}) == 404
+    # A trusted proxy that forwards nothing usable means deny, not "the proxy itself".
+    assert _admin(client) == 404
+    assert _admin(client, **{"X-Forwarded-For": "not-an-ip"}) == 404
+    assert _admin(client, **{"X-Forwarded-For": "172.18.0.9"}) == 404  # only proxies in the chain
+
+
+def test_invalid_network_entries_deny(make_client):
+    client = make_client(peer="127.0.0.1", admin_allowed_nets="127.0.0.0/8,oops")
+    assert _admin(client) == 404
+    client = make_client(peer=PROXY, admin_allowed_nets="10.0.0.0/8", trusted_proxies="172.18.0.0/16,bad")
+    assert _admin(client, **{"X-Forwarded-For": "10.1.2.3"}) == 404
+
+
+def test_default_admin_nets_are_loopback_only():
     from agent_helper.config import DEFAULT_ADMIN_NETS, parse_networks
     from agent_helper.limits import address_allowed
 
     nets = parse_networks(DEFAULT_ADMIN_NETS)
-    assert address_allowed("127.0.0.1", nets) and address_allowed("192.168.1.5", nets)
-    assert address_allowed("::ffff:10.0.0.1", nets) and address_allowed("fd00::1", nets)
+    assert address_allowed("127.0.0.1", nets) and address_allowed("::1", nets)
+    assert not address_allowed("192.168.1.5", nets) and not address_allowed("fd00::1", nets)
     assert not address_allowed("203.0.113.7", nets) and not address_allowed("2001:db8::1", nets)
     assert not address_allowed("testclient", nets)
     assert address_allowed("anything", parse_networks("any"))

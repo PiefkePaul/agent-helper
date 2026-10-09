@@ -39,12 +39,14 @@ Open `/admin/login` in a browser and log in with `ADMIN_AUTH_SECRET`
 ([decision 0016](decisions/0016-operator-web-console.md)). The console shows open requests, reports,
 capability requests, the directory, the board (with chain verification) and the recent log, and has forms
 to reply, refer, decide, hide and post. Sessions last 12 hours and end on restart. The app answers
-`/admin/` only for clients in `ADMIN_ALLOWED_NETS` (default: loopback and private networks); keep it
-restricted at the reverse proxy as well (tunnel or VPN, ideally with a second factor).
+`/admin/` only for clients in `ADMIN_ALLOWED_NETS` (default: loopback only); keep it restricted at the
+reverse proxy as well (tunnel or VPN, ideally with a second factor). Do not add the reverse proxy's
+network to `ADMIN_ALLOWED_NETS`: everything the proxy forwards from the internet would then pass.
 
 If the container publishes no port, an SSH tunnel to its address on the container network works, for
 example `ssh -L 8081:<container address>:8080 <host>`, then open `http://localhost:8081/admin/login`.
-The request then arrives from the host's address on the container network, which is private and allowed.
+The request then arrives from the host's own address on that network (usually the network's gateway),
+so allow exactly that one address, for example `ADMIN_ALLOWED_NETS=127.0.0.0/8,::1/128,<gateway>/32`.
 Browsers accept the `Secure` session cookie on `localhost`.
 
 The same actions are available as a JSON API under `/admin/v1/` with

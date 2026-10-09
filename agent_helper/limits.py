@@ -93,17 +93,54 @@ def client_key(scope: Scope, trust_proxy_headers: bool) -> str:
     return _address_key(client_address(scope, trust_proxy_headers))
 
 
-def address_allowed(raw: str, networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] | None) -> bool:
-    """Whether `raw` lies in one of `networks`. None means every client is allowed."""
+Networks = tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]
+
+
+def _ip(raw: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        addr = ipaddress.ip_address(raw.strip())
+    except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    return addr
+
+
+def _in(addr: ipaddress.IPv4Address | ipaddress.IPv6Address, networks: Networks) -> bool:
+    return any(addr in net for net in networks if addr.version == net.version)
+
+
+def admin_client(scope: Scope, trusted_proxies: Networks) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The address the admin check applies to, or None (deny) when it cannot be determined.
+
+    The socket peer counts, unless it is a trusted proxy: then X-Forwarded-For is read from the right and
+    the first address that is not itself a trusted proxy counts. A trusted proxy that sends no usable
+    X-Forwarded-For means deny. Addresses further left are written by the client and never trusted.
+    """
+    client = scope.get("client")
+    peer = _ip(client[0]) if client else None
+    if peer is None or not _in(peer, trusted_proxies):
+        return peer
+    forwarded = [v.decode("latin-1") for k, v in scope.get("headers", []) if k == b"x-forwarded-for"]
+    hops = [h for line in forwarded for h in line.split(",")]
+    for hop in reversed(hops):
+        addr = _ip(hop)
+        if addr is None:
+            return None
+        if not _in(addr, trusted_proxies):
+            return addr
+    return None
+
+
+def address_allowed(
+    addr: ipaddress.IPv4Address | ipaddress.IPv6Address | str | None, networks: Networks | None
+) -> bool:
+    """Whether `addr` lies in one of `networks`. None as networks means every client is allowed."""
     if networks is None:
         return True
-    try:
-        addr = ipaddress.ip_address(raw)
-    except ValueError:
-        return False
-    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
-        addr = addr.ipv4_mapped
-    return any(addr in net for net in networks if addr.version == net.version)
+    if isinstance(addr, str):
+        addr = _ip(addr)
+    return addr is not None and _in(addr, networks)
 
 
 def _loggable(path: str, max_length: int = 200) -> str:
@@ -131,9 +168,11 @@ class GuardMiddleware:
         trust_proxy_headers: bool,
         global_write_limiter: TokenBucket | None = None,
         self_limited_paths: frozenset[str] = frozenset(),
-        admin_networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] | None = None,
+        admin_networks: Networks | None = None,
+        trusted_proxies: Networks = (),
     ) -> None:
         self.admin_networks = admin_networks
+        self.trusted_proxies = trusted_proxies
         self.app = app
         self.max_body_bytes = max_body_bytes
         self.read_limiter = read_limiter
@@ -159,7 +198,7 @@ class GuardMiddleware:
 
         path = scope["path"]
         if (path == "/admin" or path.startswith("/admin/")) and not address_allowed(
-            client_address(scope, self.trust_proxy_headers), self.admin_networks
+            admin_client(scope, self.trusted_proxies), self.admin_networks
         ):
             # The admin API and console do not exist for clients outside ADMIN_ALLOWED_NETS.
             status_holder["status"] = 404

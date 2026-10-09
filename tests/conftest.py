@@ -14,7 +14,7 @@ ADMIN_SECRET = "test-admin-secret-" + "x" * 32
 def make_client(tmp_path) -> Iterator[Callable[..., TestClient]]:
     clients: list[TestClient] = []
 
-    def _make(**overrides) -> TestClient:
+    def _make(peer: str = "testclient", **overrides) -> TestClient:
         settings = Settings(
             public_base_url="http://testserver",
             data_dir=tmp_path,
@@ -25,7 +25,7 @@ def make_client(tmp_path) -> Iterator[Callable[..., TestClient]]:
             admin_allowed_nets="any",  # the test client has no IP address
         )
         settings = dataclasses.replace(settings, **overrides)
-        client = TestClient(create_app(settings))
+        client = TestClient(create_app(settings), client=(peer, 50000))
         client.__enter__()
         clients.append(client)
         return client
