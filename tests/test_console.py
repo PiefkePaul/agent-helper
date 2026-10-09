@@ -9,11 +9,9 @@ def _csrf(html: str) -> str:
 
 
 @pytest.fixture
-def console(client):
-    """A client logged in to the console as through an SSH tunnel (http://localhost). Returns (client, csrf)."""
-    from fastapi.testclient import TestClient
-
-    client = TestClient(client.app, base_url="http://localhost")
+def console(make_client):
+    """A client logged in to the console over plain http. Returns (client, csrf)."""
+    client = make_client(admin_cookie_secure=False)  # the test client speaks plain http
     r = client.post("/admin/login", data={"secret": ADMIN_SECRET}, follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"] == "/admin/console"
     cookie = r.headers["set-cookie"]
@@ -331,31 +329,26 @@ def _login_cookie(client) -> str:
     return r.headers["set-cookie"]
 
 
-def test_cookie_is_not_secure_through_a_tunnel(make_client):
-    # The console through an SSH tunnel: http://localhost, while the public URL is https (issue #17).
-    from fastapi.testclient import TestClient
-
-    client = make_client(public_base_url="https://agents.example.invalid")
-    local = TestClient(client.app, base_url="http://localhost:8081")
-    cookie = _login_cookie(local)
+def test_cookie_without_secure_only_on_the_admin_port(make_client):
+    # Paul's live path: plain http through a LAN port forward (or SSH tunnel) to ADMIN_PORT. The test client
+    # talks to port 80, so admin_port=80 stands for that port.
+    admin_port = make_client(admin_port=80, public_base_url="https://agents.example.invalid")
+    cookie = _login_cookie(admin_port)
     assert "Secure" not in cookie and "HttpOnly" in cookie
-    assert local.get("/admin/console").status_code == 200  # the cookie works
-
-    # On the admin port (here the test client's port 80) the host name does not matter.
-    admin_port = make_client(admin_port=80)
-    assert "Secure" not in _login_cookie(admin_port)
+    assert admin_port.get("/admin/console").status_code == 200  # no login loop
 
 
 def test_cookie_is_secure_by_default_otherwise(make_client):
     from fastapi.testclient import TestClient
 
-    client = make_client()  # plain http to "testserver", no admin port: not a tunnel
+    client = make_client()  # no admin port
     assert "Secure" in _login_cookie(client)
-    https = TestClient(client.app, base_url="https://localhost")
-    assert "Secure" in _login_cookie(https)
+    # A localhost name proves nothing: a plain proxy_pass to 127.0.0.1 looks the same.
+    assert "Secure" in _login_cookie(TestClient(client.app, base_url="http://localhost"))
+    assert "Secure" in _login_cookie(TestClient(client.app, base_url="http://127.0.0.1"))
+    assert "Secure" in _login_cookie(TestClient(client.app, base_url="https://testserver"))
     assert "Secure" in _login_cookie(make_client(admin_cookie_secure=True, admin_port=80))
-    insecure = make_client(admin_cookie_secure=False)
-    assert "Secure" not in _login_cookie(insecure)
+    assert "Secure" not in _login_cookie(make_client(admin_cookie_secure=False))
 
 
 def test_cookie_secure_setting(monkeypatch):
@@ -364,16 +357,3 @@ def test_cookie_secure_setting(monkeypatch):
     for raw, expected in (("auto", None), ("", None), ("true", True), ("false", False)):
         monkeypatch.setenv("ADMIN_COOKIE_SECURE", raw)
         assert Settings.from_env().admin_cookie_secure is expected
-
-
-@pytest.mark.parametrize(
-    "header",
-    ["X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host", "Forwarded", "X-Real-IP"],
-)
-def test_proxy_rewriting_the_host_to_localhost_gets_a_secure_cookie(make_client, header):
-    from fastapi.testclient import TestClient
-
-    client = make_client()
-    proxied = TestClient(client.app, base_url="http://127.0.0.1")
-    r = proxied.post("/admin/login", data={"secret": ADMIN_SECRET}, headers={header: "x"}, follow_redirects=False)
-    assert "Secure" in r.headers["set-cookie"]

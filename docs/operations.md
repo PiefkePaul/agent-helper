@@ -44,9 +44,10 @@ Recommended setup: set `ADMIN_PORT` (for example 8081). `/admin` then exists onl
 public port has no `/admin` at all. Publish the admin port on the host's loopback address only
 (`127.0.0.1:8081:8081`, see `docker-compose.example.yml`), never point the reverse proxy at it, and
 open the console through an SSH tunnel: `ssh -L 8081:127.0.0.1:8081 <host>`, then
-`http://localhost:8081/admin/login`. On the admin port or `localhost` over plain http the session
-cookie is not marked `Secure` (`ADMIN_COOKIE_SECURE=auto`), so every browser keeps it, Safari included;
-the tunnel encrypts the traffic. Everywhere else the cookie is `Secure`.
+`http://localhost:8081/admin/login`. On the admin port over plain http the session cookie is not
+marked `Secure` (`ADMIN_COOKIE_SECURE=auto`), so every browser keeps it, Safari included; the tunnel (or
+your LAN) carries the traffic. Everywhere else the cookie is `Secure`; without `ADMIN_PORT`, plain-http
+console access needs `ADMIN_COOKIE_SECURE=false`.
 
 Without `ADMIN_PORT`, the app answers `/admin/` on the public port only for clients in
 `ADMIN_ALLOWED_NETS` (default: loopback only), for example a command run inside the container. Do not
