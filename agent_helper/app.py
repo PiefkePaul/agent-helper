@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Res
 
 from . import __version__, discovery
 from .a2a import A2AEndpoint, agent_card
-from .catalog import Capability, CapabilityIn, Catalog, load_file_entries
+from .catalog import PUSH_CAPABILITY, Capability, CapabilityIn, Catalog, load_file_entries
 from .config import Settings, parse_networks
 from .console import build_console
 from .handles import HANDLE_PATTERN, OPERATOR_HANDLE
@@ -39,6 +39,8 @@ from .models import (
     ProfileIn,
     ProfileOut,
     PurgeIn,
+    PushIn,
+    PushVerifyIn,
     RecoverIn,
     ReferralIn,
     ReportDecisionIn,
@@ -53,6 +55,8 @@ from .models import (
     next_offset,
 )
 from .notify import Notifier
+from .push import PushManager
+from .pushcheck import DestinationRefused
 from .store import (
     CHALLENGE_SECONDS,
     ConversationFull,
@@ -60,6 +64,7 @@ from .store import (
     MailLimits,
     MailRefused,
     PurgeRefused,
+    PushRefused,
     SignatureRejected,
     Store,
 )
@@ -92,15 +97,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # (the console's log view reads these records).
     logging.getLogger("agent_helper").setLevel(settings.log_level.upper())
     notifier = Notifier.from_settings(settings)
-    # The hook looks the notifier up on every event so tests can swap its transport.
-    store = Store(
-        settings.db_path,
-        on_event=lambda event, **fields: app.state.notifier.emit(event, **fields),
-    )
+
+    def on_event(event: str, **fields: Any) -> None:
+        # Looked up on every event so tests can swap the notifier's transport and the push manager.
+        app.state.notifier.emit(event, **fields)
+        app.state.push.emit(event, **fields)
+
+    store = Store(settings.db_path, on_event=on_event)
+    mail_limits = MailLimits(settings.max_mailbox_messages, settings.mail_retention_days)
+    push = PushManager(settings, store, mail_limits)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        app.state.push.start()
         yield
+        app.state.push.close()
         app.state.notifier.close()
         store.close()
 
@@ -114,6 +125,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.notifier = notifier
     app.state.store = store
+    app.state.push = push
     write_limiter = TokenBucket(settings.write_per_minute)
     global_write_limiter = TokenBucket(settings.global_write_per_minute)
     app.add_middleware(
@@ -128,7 +140,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         trusted_proxies=parse_networks(settings.trusted_proxies) or (),
         admin_port=settings.admin_port,
     )
-    catalog = Catalog(load_file_entries(settings), store)
+    catalog = Catalog(load_file_entries(settings), store, [PUSH_CAPABILITY] if settings.push_enabled else None)
     mcp = McpEndpoint(settings, store, catalog, write_limiter, global_write_limiter)
     a2a = A2AEndpoint(settings, store, write_limiter, global_write_limiter)
 
@@ -138,6 +150,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(SignatureRejected)
     async def signature_rejected(_: Request, exc: SignatureRejected) -> JSONResponse:
+        return JSONResponse({"detail": str(exc)}, status_code=exc.status)
+
+    @app.exception_handler(PushRefused)
+    async def push_refused(_: Request, exc: PushRefused) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=exc.status)
 
     @app.exception_handler(MailRefused)
@@ -394,8 +410,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # --- agent directory and mailboxes (docs/decisions/0013) ----------------------------------------
 
-    mail_limits = MailLimits(settings.max_mailbox_messages, settings.mail_retention_days)
-
     @v1.put("/directory/{handle}", tags=["directory"])
     def put_profile(handle: HandlePath, body: ProfileIn) -> JSONResponse:
         data = body.model_dump(exclude={"handle_token"})
@@ -552,6 +566,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         note = "A new handle_token, shown once. The old one no longer works."
         return JSONResponse({"handle": handle, "handle_token": token, "note": note}, headers=no_store)
 
+    # --- push notices to agents' endpoints (docs/decisions/0020) -----------------------------------
+
+    def require_push() -> None:
+        if not settings.push_enabled:
+            raise HTTPException(404, "push notices are not offered by this instance; poll your mailbox instead")
+
+    @v1.put("/handles/{handle}/push", tags=["push"], dependencies=[Depends(require_push)])
+    def put_push(handle: HandlePath, body: PushIn, authorization: AuthHeader = None) -> JSONResponse:
+        try:
+            dest = app.state.push.check(body.url)
+        except DestinationRefused as exc:
+            # Only syntax and policy, never anything about the network: no oracle (0020, step 1).
+            raise HTTPException(422, str(exc)) from None
+        events = sorted(set(body.events))
+        found = store.put_push(handle, _bearer(authorization), body.url, dest.host, events)
+        if found is None:
+            raise HTTPException(404, NOT_FOUND)
+        view, secret = found
+        app.state.push.nudge()
+        out = view | {
+            "secret": secret,
+            "note": "Pending. A verification request with a code is sent to the URL; confirm it with POST "
+            f"/v1/handles/{handle}/push/verify. Keep 'secret': it is shown only once. Every notice carries "
+            "X-Agent-Helper-Signature: sha256=HMAC-SHA256(secret, '<X-Agent-Helper-Timestamp>.<X-Agent-Helper-"
+            "Event-Id>.<raw body>'); reject timestamps older than 5 minutes and repeated event ids. Notices "
+            "only say that something is waiting; fetch it with your token as usual.",
+        }
+        return JSONResponse(out, headers=no_store)
+
+    @v1.get("/handles/{handle}/push", tags=["push"], dependencies=[Depends(require_push)])
+    def get_push(handle: HandlePath, authorization: AuthHeader = None) -> JSONResponse:
+        found = store.get_push(handle, _bearer(authorization))
+        if found is None:
+            raise HTTPException(404, NOT_FOUND)
+        return JSONResponse(found, headers=no_store)
+
+    @v1.delete("/handles/{handle}/push", status_code=204, tags=["push"], dependencies=[Depends(require_push)])
+    def delete_push(handle: HandlePath, authorization: AuthHeader = None) -> Response:
+        if not store.delete_push(handle, _bearer(authorization)):
+            raise HTTPException(404, NOT_FOUND)
+        return Response(status_code=204)
+
+    @v1.post("/handles/{handle}/push/verify", tags=["push"], dependencies=[Depends(require_push)])
+    def verify_push(handle: HandlePath, body: PushVerifyIn, authorization: AuthHeader = None) -> JSONResponse:
+        found = store.verify_push(handle, _bearer(authorization), body.code)
+        if found is None:
+            raise HTTPException(404, NOT_FOUND)
+        return JSONResponse(found, headers=no_store)
+
+    @v1.post("/handles/{handle}/push/renew", tags=["push"], dependencies=[Depends(require_push)])
+    def renew_push(handle: HandlePath, authorization: AuthHeader = None) -> JSONResponse:
+        found = store.renew_push(handle, _bearer(authorization))
+        if found is None:
+            raise HTTPException(404, NOT_FOUND)
+        app.state.push.nudge()
+        return JSONResponse(found, headers=no_store)
+
     app.include_router(v1)
 
     # --- operator API ---------------------------------------------------------------------------
@@ -697,6 +768,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if entry is None:
             raise HTTPException(404, "no such entry")
         return BoardEntry(**entry)
+
+    @admin.get("/push")
+    def admin_push(limit: Annotated[int, Query(ge=1, le=500)] = 200) -> list[dict[str, Any]]:
+        return store.list_push_admin(limit)
+
+    @admin.post("/push/{sub_id}/suspend")
+    def admin_suspend_push(sub_id: Annotated[str, Path(max_length=64)]) -> dict[str, bool]:
+        if not store.admin_suspend_push(sub_id, mail_limits):
+            raise HTTPException(404, "no such subscription")
+        return {"suspended": True}
+
+    @admin.delete("/push/{sub_id}", status_code=204)
+    def admin_delete_push(sub_id: Annotated[str, Path(max_length=64)]) -> Response:
+        if not store.admin_delete_push(sub_id):
+            raise HTTPException(404, "no such subscription")
+        return Response(status_code=204)
 
     @admin.post("/notifications/test")
     def admin_test_notification() -> dict[str, Any]:

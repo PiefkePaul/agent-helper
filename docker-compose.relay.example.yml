@@ -1,0 +1,38 @@
+# Example only, for the relay's own server (docs/decisions/0020, step 9). Copy and adapt there; never
+# commit the live file. The server needs outbound internet, inbound HTTPS from the service's address only
+# (set by the server's firewall), its own public DNS resolver, and no route into the operator's network.
+services:
+  agent-helper-relay:
+    build: .
+    command: ["python", "-m", "agent_helper.relay"]
+    restart: unless-stopped
+    env_file:
+      - relay.env          # derived from config/relay.env.example, kept outside the repository
+    ports:
+      - "8090:8090"        # or keep it on loopback behind a TLS-terminating proxy
+    # dns:                 # a public resolver of your choice, never one with an internal view
+    #   - <resolver address>
+    healthcheck:           # the image's default check is for the service, not the relay
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8090), 2)"]
+      interval: 30s
+      timeout: 3s
+    volumes:
+      - relay-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  relay-data:
