@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Res
 from . import __version__, discovery
 from .catalog import Capability, CapabilityIn, Catalog, load_file_entries
 from .config import Settings
+from .console import build_console
 from .handles import HANDLE_PATTERN, OPERATOR_HANDLE
 from .limits import GuardMiddleware, TokenBucket
 from .mcp import McpEndpoint
@@ -73,6 +74,9 @@ HandlePath = Annotated[str, Path(max_length=64, pattern=HANDLE_PATTERN)]
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     logging.basicConfig(level=settings.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    # basicConfig does nothing when logging is already configured; the service's own level must still apply
+    # (the console's log view reads these records).
+    logging.getLogger("agent_helper").setLevel(settings.log_level.upper())
     notifier = Notifier.from_settings(settings)
     # The hook looks the notifier up on every event so tests can swap its transport.
     store = Store(settings.db_path, on_event=lambda event, **fields: app.state.notifier.emit(event, **fields))
@@ -596,4 +600,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"delivered": result.ok, "status": result.status, "error": result.error}
 
     app.include_router(admin)
+    app.include_router(build_console(settings, store, catalog, lambda: app.state.notifier, mail_limits))
     return app

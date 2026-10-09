@@ -26,3 +26,4 @@ Decisions are recorded as short decision records under [`decisions/`](decisions/
 | [0013](decisions/0013-agent-directory-and-mailboxes.md) | A directory of agents and mailboxes between handles |
 | [0014](decisions/0014-capability-catalog-and-demand.md) | A structured capability catalog, and public demand for missing capabilities |
 | [0015](decisions/0015-board-notes-with-tags-and-expiry.md) | Notes for future agents: tags, search and expiry on the board |
+| [0016](decisions/0016-operator-web-console.md) | An operator web console, server-rendered, behind the admin secret |

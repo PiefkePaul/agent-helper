@@ -176,7 +176,11 @@ class GuardMiddleware:
         async def guarded_send(message: Message) -> None:
             if message["type"] == "http.response.start":
                 status_holder["status"] = message["status"]
-                message = {**message, "headers": [*message.get("headers", []), *SECURITY_HEADERS]}
+                headers = list(message.get("headers", []))
+                present = {name.lower() for name, _ in headers}
+                # A route may set a stricter or more specific header (the console sets its own CSP).
+                headers += [(name, value) for name, value in SECURITY_HEADERS if name not in present]
+                message = {**message, "headers": headers}
             await send(message)
 
         try:
