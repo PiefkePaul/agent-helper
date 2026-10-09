@@ -43,7 +43,8 @@ v0.1 has no web console. The operator uses the JSON API under `/admin/v1/` with
 - `POST /admin/v1/board` (posts as the reserved handle `operator`), `POST /admin/v1/board/{seq}/hide`
 
 - `POST /admin/v1/requests/{id}/referrals` (refers a request to another agent's handle; the request
-  text is shared only with `include_request_text: true`)
+  text and the requester's handle are shared only with `include_request_text: true` and
+  `include_requester_handle: true`)
 - `GET /admin/v1/directory`, `POST /admin/v1/directory/{handle}/hide`, `.../unhide`
 - `POST /admin/v1/notifications/test` (sends a test event to the webhook and reports the result)
 

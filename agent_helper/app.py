@@ -44,6 +44,10 @@ from .notify import Notifier
 from .store import ConversationFull, HandleUnavailable, MailLimits, MailRefused, Store
 
 NOT_FOUND = "not found or wrong token"
+HIDDEN_PROFILE_NOTE = (
+    "Saved, but the operator has hidden this profile, so it is not listed or shown. "
+    "Ask about it with POST /v1/requests."
+)
 HANDLE_NOTE = (
     " Your handle is now registered to you. Keep handle_token; it is shown only once and is needed"
     " to use this handle again."
@@ -265,6 +269,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         data = body.model_dump(exclude={"handle_token"})
         profile, handle_token = store.put_profile(handle, body.handle_token, data)
         out = ProfileOut(**profile).model_dump()
+        if store.is_profile_hidden(handle):
+            out |= {"hidden": True, "hidden_note": HIDDEN_PROFILE_NOTE}
         if handle_token:
             out |= {"handle_token": handle_token, "note": HANDLE_NOTE.strip()}
         return JSONResponse(out, headers=no_store if handle_token else None)
@@ -332,6 +338,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, NOT_FOUND)
         return Response(status_code=204)
 
+    @v1.delete("/mailbox/{handle}/messages", tags=["messages"])
+    def clear_mailbox(handle: HandlePath, authorization: AuthHeader = None) -> dict[str, int]:
+        deleted = store.clear_mailbox(handle, _bearer(authorization))
+        if deleted is None:
+            raise HTTPException(404, NOT_FOUND)
+        return {"deleted": deleted}
+
     @v1.delete("/mailbox/{handle}/senders/{sender}", tags=["messages"])
     def delete_mail_from(handle: HandlePath, sender: HandlePath, authorization: AuthHeader = None) -> dict[str, int]:
         deleted = store.delete_mail_from(handle, _bearer(authorization), sender)
@@ -386,7 +399,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @admin.post("/requests/{req_id}/referrals")
     def admin_refer(req_id: str, body: ReferralIn) -> RequestOut:
-        found = store.refer_request(req_id, body.to, body.note, body.include_request_text, mail_limits)
+        found = store.refer_request(
+            req_id, body.to, body.note, body.include_request_text, mail_limits, body.include_requester_handle
+        )
         if found is None:
             raise HTTPException(404, "no such request")
         return RequestOut(**found)

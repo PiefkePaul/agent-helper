@@ -208,16 +208,21 @@ def test_operator_referral(two_agents, admin_headers):
 
     (referral,) = client.get("/v1/mailbox/orion", headers=_bearer(orion)).json()["messages"]
     assert referral["sender"] == "operator" and referral["kind"] == "referral"
-    assert "lyra" in referral["body"]
-    assert "big crawl" not in referral["body"]  # the request text is shared only on purpose
+    # The request text and the requester's handle are shared only on purpose.
+    assert "lyra" not in referral["body"] and "big crawl" not in referral["body"]
 
     r = client.post(
         f"/admin/v1/requests/{created['id']}/referrals",
-        json={"to": "orion", "note": "Full text attached.", "include_request_text": True},
+        json={
+            "to": "orion",
+            "note": "Full text attached.",
+            "include_request_text": True,
+            "include_requester_handle": True,
+        },
         headers=admin_headers,
     )
     inbox = client.get("/v1/mailbox/orion", headers=_bearer(orion)).json()["messages"]
-    assert "big crawl" in inbox[-1]["body"]
+    assert "big crawl" in inbox[-1]["body"] and "lyra" in inbox[-1]["body"]
 
     r = client.post(
         f"/admin/v1/requests/{created['id']}/referrals", json={"to": "nobody", "note": "x"}, headers=admin_headers
@@ -269,3 +274,36 @@ def test_one_sender_cannot_fill_a_mailbox_and_recipient_can_clear_it(make_client
     r = client.delete("/v1/mailbox/orion/senders/nova", headers=_bearer(orion))
     assert r.json() == {"deleted": 50}
     assert client.post("/v1/messages", json=msg).status_code == 201
+
+
+def test_referral_respects_opt_out(two_agents, admin_headers):
+    client, _, orion = two_agents
+    _publish(client, "orion", orion, accepts_messages=False)
+    req = client.post("/v1/requests", json={"message": "help"}).json()
+    r = client.post(
+        f"/admin/v1/requests/{req['id']}/referrals", json={"to": "orion", "note": "x"}, headers=admin_headers
+    )
+    assert r.status_code == 403
+
+
+def test_agents_cannot_send_referrals(two_agents):
+    client, nova, _ = two_agents
+    msg = {"sender": "nova", "to": "orion", "message": "x", "kind": "referral", "handle_token": nova}
+    assert client.post("/v1/messages", json=msg).status_code == 422
+
+
+def test_clear_whole_mailbox(two_agents):
+    client, nova, orion = two_agents
+    for _ in range(3):
+        client.post("/v1/messages", json={"sender": "nova", "to": "orion", "message": "x", "handle_token": nova})
+    assert client.delete("/v1/mailbox/orion/messages", headers=_bearer(nova)).status_code == 404
+    assert client.delete("/v1/mailbox/orion/messages", headers=_bearer(orion)).json() == {"deleted": 3}
+    assert client.get("/v1/mailbox/orion", headers=_bearer(orion)).json()["messages"] == []
+
+
+def test_update_of_hidden_profile_says_so(two_agents, admin_headers):
+    client, nova, _ = two_agents
+    assert "hidden" not in _publish(client, "nova", nova)
+    client.post("/admin/v1/directory/nova/hide", json={"reason": "spam"}, headers=admin_headers)
+    updated = _publish(client, "nova", nova)
+    assert updated["hidden"] is True and "hidden" in updated["hidden_note"]

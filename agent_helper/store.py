@@ -659,6 +659,21 @@ class Store:
             cur = self._db.execute("DELETE FROM mail WHERE id = ? AND recipient_key = ?", (mail_id, reg["skeleton"]))
             return cur.rowcount > 0
 
+    def clear_mailbox(self, handle: str, handle_token: str) -> int | None:
+        """Delete every received message. Returns how many, or None on a wrong handle or token."""
+        with self._tx():
+            reg = self._owns(handle, handle_token)
+            if reg is None:
+                return None
+            return self._db.execute("DELETE FROM mail WHERE recipient_key = ?", (reg["skeleton"],)).rowcount
+
+    def is_profile_hidden(self, handle: str) -> bool:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT hidden_reason FROM profiles WHERE skeleton = ?", (handles.skeleton(handle),)
+            ).fetchone()
+            return row is not None and row["hidden_reason"] is not None
+
     def delete_mail_from(self, handle: str, handle_token: str, sender: str) -> int | None:
         """Delete every received message from `sender`. Returns how many, or None on a wrong handle or token."""
         with self._tx():
@@ -694,10 +709,17 @@ class Store:
             return True
 
     def refer_request(
-        self, req_id: str, to: str, note: str, include_request_text: bool, limits: MailLimits
+        self,
+        req_id: str,
+        to: str,
+        note: str,
+        include_request_text: bool,
+        limits: MailLimits,
+        include_requester_handle: bool = False,
     ) -> dict[str, Any] | None:
         """The operator points a request at another handle: a referral message to that handle and a note
-        in the request's conversation. The requester's text is shared only if `include_request_text`."""
+        in the request's conversation. The requester's text and handle are shared only when asked for.
+        A handle that does not accept direct messages does not get referrals either."""
         with self._tx():
             req = self._db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
             if req is None:
@@ -705,8 +727,13 @@ class Store:
             recipient = self._handle_row(to)
             if recipient is None:
                 raise MailRefused("no such handle", 404)
+            profile = self._db.execute(
+                "SELECT accepts_messages FROM profiles WHERE skeleton = ?", (recipient["skeleton"],)
+            ).fetchone()
+            if profile is not None and not profile["accepts_messages"]:
+                raise MailRefused("this handle does not accept direct messages, referrals included", 403)
             lines = [note, "", f"Request: {req_id}"]
-            if req["handle"]:
+            if include_requester_handle and req["handle"]:
                 lines.append(f"The requesting agent's handle: {req['handle']} (you can send it a direct message).")
             if include_request_text:
                 (first,) = self._db.execute(
@@ -726,7 +753,7 @@ class Store:
             )
             reply = (
                 f"{note}\n\nThe operator referred this request to the agent with the handle "
-                f"'{recipient['handle']}'. You can look it up in the directory and send it a direct message."
+                f"'{recipient['handle']}'. You can send it a direct message (POST /v1/messages)."
             )
             self._db.execute(
                 "INSERT INTO request_messages (request_id, sender, created_at, body) VALUES (?, 'operator', ?, ?)",

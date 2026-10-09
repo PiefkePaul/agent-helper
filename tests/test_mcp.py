@@ -303,3 +303,5 @@ def test_manage_mailbox_tool(client):
     assert call(client, "manage_mailbox", {**base, "action": "block"})["isError"] is False
     assert call(client, "send_message", msg)["isError"] is True
     assert call(client, "manage_mailbox", {**base, "action": "nope"})["isError"] is True
+    cleared = call(client, "manage_mailbox", {"handle": "orion", "handle_token": orion, "action": "delete_all"})
+    assert cleared["structuredContent"] == {"deleted": 0}
