@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import board, handles, keys
+from . import board, db, handles, keys
 
 log = logging.getLogger("agent_helper.store")
 
@@ -364,14 +364,8 @@ class Store:
         self._last_mail_purge = -1e9
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
-        self._db.row_factory = sqlite3.Row
+        self._db = db.connect(path, check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA foreign_keys=ON")
-        # Without this, INSERT OR REPLACE deletes the old row without firing the no-delete triggers that
-        # keep the board, its checkpoints and revocation records unchangeable.
-        self._db.execute("PRAGMA recursive_triggers=ON")
-        self._db.execute("PRAGMA secure_delete=ON")  # deleted text (expired notes, purged mail) is overwritten
         self._last_board_purge = -1e9
         self._db.executescript(SCHEMA)
         self._migrate()

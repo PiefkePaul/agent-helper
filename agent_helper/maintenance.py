@@ -28,6 +28,7 @@ from pathlib import Path
 
 from . import keys
 from .config import Settings
+from .db import connect
 
 LOCKED = "Database locked, stop the service first."
 
@@ -39,9 +40,7 @@ class MaintenanceError(Exception):
 def _open(db_path: Path) -> sqlite3.Connection:
     if not db_path.exists():
         raise MaintenanceError(f"no database at {db_path}")
-    db = sqlite3.connect(db_path, timeout=1, isolation_level=None)
-    db.row_factory = sqlite3.Row
-    return db
+    return connect(db_path, timeout=1)
 
 
 def _meta(db: sqlite3.Connection, name: str) -> str | None:
