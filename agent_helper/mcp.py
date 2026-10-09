@@ -224,6 +224,8 @@ def build_tools(settings: Settings, store: Store, capabilities: dict[str, Any]) 
         body = _parse(ProfileIn, {k: v for k, v in args.items() if k != "handle"})
         profile, handle_token = store.put_profile(handle, body.handle_token, body.model_dump(exclude={"handle_token"}))
         out = ProfileOut(**profile).model_dump()
+        if store.is_profile_hidden(handle):
+            out |= {"hidden": True, "hidden_note": "The operator has hidden this profile; it is not listed."}
         if handle_token:
             out |= {"handle_token": handle_token, "note": "Your handle is now registered to you; keep handle_token."}
         return out
@@ -272,7 +274,13 @@ def build_tools(settings: Settings, store: Store, capabilities: dict[str, Any]) 
 
     def manage_mailbox(args: dict[str, Any]) -> dict[str, Any]:
         handle, token = _handle(args), _string(args, "handle_token")
-        action, other = args.get("action"), _handle(args, "other")
+        action = args.get("action")
+        if action == "delete_all":
+            deleted = store.clear_mailbox(handle, token)
+            if deleted is None:
+                raise ToolError(NOT_FOUND)
+            return {"deleted": deleted}
+        other = _handle(args, "other")
         try:
             if action == "delete_from":
                 deleted = store.delete_mail_from(handle, token, other)
@@ -285,7 +293,7 @@ def build_tools(settings: Settings, store: Store, capabilities: dict[str, Any]) 
                 return {"handle": other, "blocked": action == "block"}
         except MailRefused as exc:
             raise ToolError(str(exc)) from None
-        raise ToolError("invalid arguments: 'action' must be 'delete_from', 'block' or 'unblock'")
+        raise ToolError("invalid arguments: 'action' must be 'delete_all', 'delete_from', 'block' or 'unblock'")
 
     profile_schema = _schema(ProfileIn)
     profile_schema["properties"] = {"handle": HANDLE_ARG, **profile_schema["properties"]}
@@ -397,7 +405,7 @@ def build_tools(settings: Settings, store: Store, capabilities: dict[str, Any]) 
         Tool(
             "send_message",
             "Message another agent",
-            "Send a direct message, a task handoff (kind 'handoff'), or a referral to another agent's handle. "
+            "Send a direct message or a task handoff (kind 'handoff') to another agent's handle. "
             "'sender' is your handle; the first use registers it and returns a handle_token. Messages are "
             "stored on this service, are not end-to-end encrypted, and expire after some time. "
             'Example: {"sender": "nova", "to": "orion", "message": "Can you crawl example.org?", '
@@ -427,18 +435,19 @@ def build_tools(settings: Settings, store: Store, capabilities: dict[str, Any]) 
         Tool(
             "manage_mailbox",
             "Block a sender or clear its messages",
-            "Keep your mailbox under control: 'delete_from' deletes every message you received from the handle "
-            "'other', 'block' stops it from messaging you, 'unblock' lifts that. "
+            "Keep your mailbox under control: 'delete_all' empties your inbox, 'delete_from' deletes every "
+            "message you received from the handle 'other', 'block' stops it from messaging you, 'unblock' lifts "
+            "that. "
             'Example: {"handle": "orion", "handle_token": "...", "action": "block", '
             '"other": "spammer"}.',
             _object(
                 {
                     "handle": HANDLE_ARG,
                     "handle_token": HANDLE_TOKEN_ARG,
-                    "action": {"type": "string", "enum": ["delete_from", "block", "unblock"]},
+                    "action": {"type": "string", "enum": ["delete_all", "delete_from", "block", "unblock"]},
                     "other": HANDLE_ARG,
                 },
-                ["handle", "handle_token", "action", "other"],
+                ["handle", "handle_token", "action"],
             ),
             True,
             manage_mailbox,

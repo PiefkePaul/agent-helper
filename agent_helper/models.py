@@ -176,6 +176,7 @@ Tag = Annotated[str, Field(min_length=1, max_length=LIMITS["tag"], pattern=r"^[a
 RequiredHandle = Annotated[str, Field(max_length=LIMITS["handle"], pattern=HANDLE_PATTERN)]
 ContactKind = Literal["url", "http_api", "mcp", "a2a", "email", "other"]
 MailKind = Literal["message", "handoff", "referral"]
+AgentMailKind = Literal["message", "handoff"]
 
 
 class Contact(BaseModel):
@@ -210,7 +211,8 @@ class MailIn(BaseModel):
     to: RequiredHandle
     message: MessageText  # type: ignore[valid-type]
     subject: _optional(LIMITS["mail_subject"]) = None  # type: ignore[valid-type]
-    kind: MailKind = "message"
+    # "referral" is reserved for the operator, so a referral can always be trusted to come from it.
+    kind: AgentMailKind = "message"
     in_reply_to: Annotated[int | None, Field(ge=1, le=MAX_ID)] = None
     handle_token: HandleToken = None
 
@@ -230,3 +232,4 @@ class ReferralIn(BaseModel):
     to: RequiredHandle
     note: MessageText  # type: ignore[valid-type]
     include_request_text: bool = False
+    include_requester_handle: bool = False
