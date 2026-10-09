@@ -361,7 +361,8 @@ class Store:
 
     def _meta(self, name: str, make: Callable[[], str]) -> str:
         """A value stored once per database; created on first use."""
-        self._db.execute("INSERT OR IGNORE INTO instance_meta (name, value) VALUES (?, ?)", (name, make()))
+        if self._db.execute("SELECT 1 FROM instance_meta WHERE name = ?", (name,)).fetchone() is None:
+            self._db.execute("INSERT OR IGNORE INTO instance_meta (name, value) VALUES (?, ?)", (name, make()))
         (value,) = self._db.execute("SELECT value FROM instance_meta WHERE name = ?", (name,)).fetchone()
         return value
 
@@ -794,34 +795,49 @@ class Store:
         signature = keys.sign(self._signing_key, keys.checkpoint_statement(self.instance, seq, entry_hash, ts))
         return {"seq": seq, "entry_hash": entry_hash, "time": ts, "key_id": self.key_id, "signature": signature}
 
-    def _checkpoint_if_due(self) -> None:
-        """Record a signed checkpoint of the head if the head moved and the last one is old enough. Must
-        run inside `_tx`."""
-        head = self._db.execute("SELECT seq, entry_hash FROM board_chain ORDER BY seq DESC LIMIT 1").fetchone()
+    def _checkpoint_due(self) -> bool:
+        """Whether the head moved since the last checkpoint and that one is old enough. The caller holds
+        the lock."""
+        head = self._db.execute("SELECT seq FROM board_chain ORDER BY seq DESC LIMIT 1").fetchone()
         if head is None:
-            return
+            return False
         last = self._db.execute("SELECT seq, time FROM board_checkpoints ORDER BY seq DESC LIMIT 1").fetchone()
-        if last is not None:
-            age = time.time() - datetime.strptime(last["time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
-            if last["seq"] >= head["seq"] or age < self._checkpoint_seconds:
-                return
+        if last is None:
+            return True
+        age = time.time() - datetime.strptime(last["time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
+        # A clock that stepped back (negative age) must not stop checkpoints until it catches up.
+        return last["seq"] < head["seq"] and (age < 0 or age >= self._checkpoint_seconds)
+
+    def _checkpoint_if_due(self) -> None:
+        """Record a signed checkpoint of the head if one is due. Must run inside `_tx`."""
+        if not self._checkpoint_due():
+            return
+        head = self._db.execute("SELECT seq, entry_hash FROM board_chain ORDER BY seq DESC LIMIT 1").fetchone()
         cp = self._sign_head(head["seq"], head["entry_hash"], now())
         self._db.execute(
             "INSERT INTO board_checkpoints (seq, entry_hash, time, key_id, signature) VALUES (?, ?, ?, ?, ?)",
             (cp["seq"], cp["entry_hash"], cp["time"], cp["key_id"], cp["signature"]),
         )
 
+    def _checkpoint_on_read(self) -> None:
+        """Reads take the write lock only in the rare case that a checkpoint is due."""
+        with self._lock:
+            due = self._checkpoint_due()
+        if due:
+            with self._tx():
+                self._checkpoint_if_due()
+
     def signed_board_head(self) -> dict[str, Any]:
         """The current head, signed now by the instance key; also records a checkpoint when one is due."""
-        with self._tx():
-            self._checkpoint_if_due()
+        self._checkpoint_on_read()
+        with self._lock:
             row = self._db.execute("SELECT seq, entry_hash FROM board_chain ORDER BY seq DESC LIMIT 1").fetchone()
         seq, entry_hash = (row["seq"], row["entry_hash"]) if row else (0, board.GENESIS_HASH)
         return self._sign_head(seq, entry_hash, now())
 
     def list_checkpoints(self, after: int, limit: int) -> list[dict[str, Any]]:
-        with self._tx():
-            self._checkpoint_if_due()
+        self._checkpoint_on_read()
+        with self._lock:
             rows = self._db.execute(
                 "SELECT * FROM board_checkpoints WHERE seq > ? ORDER BY seq LIMIT ?", (after, limit)
             ).fetchall()

@@ -39,7 +39,10 @@ the details open.
   that this instance stated the old head.
 - The key sits in the same database as the board. Whoever controls the database can sign new statements,
   but cannot make old copies disappear; checkpoints are about detection, not prevention.
-- Checkpoint statements contain the instance id. After `maintenance new-instance-id` (meant for staging
-  copies, 0017) old checkpoints no longer verify on that copy, which is intended.
+- Checkpoint statements contain the instance id. `maintenance new-instance-id` (meant for staging copies,
+  0017) also gives the copy a new signing key, so old checkpoints no longer verify on that copy, which is
+  intended; the previous key is kept for `restore-instance-id`. Backups contain the private key and must be
+  protected like it.
+- Head reads take the database's write lock only when a checkpoint is actually due.
 - Not done here: external timestamping services, and rotating the instance key (that would need a
   published history of keys).

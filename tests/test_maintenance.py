@@ -70,3 +70,17 @@ def test_locked_database_gives_a_clear_message(stopped_db, capsys):
         holder.execute("ROLLBACK")
         holder.close()
     assert summary(db)["instance_id"] == instance
+
+
+def test_new_id_also_rotates_the_checkpoint_key(make_client, tmp_path, monkeypatch):
+    client = make_client()
+    instance, key = client.app.state.store.instance, client.app.state.store.public_key
+    client.__exit__(None, None, None)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    assert main(["new-instance-id", "--confirm", instance]) == 0
+    copy = make_client()
+    rotated = copy.app.state.store.public_key
+    assert rotated != key
+    copy.__exit__(None, None, None)
+    assert main(["restore-instance-id", "--confirm", copy.app.state.store.instance]) == 0
+    assert make_client().app.state.store.public_key == key

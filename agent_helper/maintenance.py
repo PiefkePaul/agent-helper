@@ -1,6 +1,7 @@
 """Operator maintenance commands, run inside the container: `python -m agent_helper.maintenance <command>`.
 
-new-instance-id      Give this database a new instance id and challenge key (docs/decisions/0017). Meant
+new-instance-id      Give this database a new instance id, challenge key and signing key
+                     (docs/decisions/0017, 0022). Meant
                      for staging or test copies of a production database, so that signatures made for
                      production cannot be replayed on the copy. Every signature stored in this database
                      then shows as invalid here. The old id is kept and printed.
@@ -18,6 +19,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from . import keys
 from .config import Settings
 
 LOCKED = "Database locked, stop the service first."
@@ -70,7 +72,9 @@ def summary(db_path: Path) -> dict[str, object]:
         db.close()
 
 
-def _swap(db_path: Path, confirm: str, new_id: str, new_key: str, *, need_previous: bool) -> tuple[str, str]:
+def _swap(
+    db_path: Path, confirm: str, new_id: str, new_key: str, new_signing: str, *, need_previous: bool
+) -> tuple[str, str]:
     db = _open(db_path)
     try:
         try:
@@ -79,6 +83,7 @@ def _swap(db_path: Path, confirm: str, new_id: str, new_key: str, *, need_previo
             raise MaintenanceError(LOCKED if "locked" in str(exc) else str(exc)) from None
         try:
             current, key = _meta(db, "instance_id"), _meta(db, "challenge_key")
+            signing = _meta(db, "signing_key")
             if current is None or key is None:
                 raise MaintenanceError("this database has no instance id yet; start the service once first")
             if confirm != current:
@@ -88,12 +93,19 @@ def _swap(db_path: Path, confirm: str, new_id: str, new_key: str, *, need_previo
                 if prev_id is None or prev_key is None:
                     raise MaintenanceError("there is no previous instance id to restore")
                 new_id, new_key = prev_id, prev_key
-            for name, value in (
+                new_signing = _meta(db, "previous_signing_key") or signing or ""
+            pairs = [
                 ("previous_instance_id", current),
                 ("previous_challenge_key", key),
                 ("instance_id", new_id),
                 ("challenge_key", new_key),
-            ):
+            ]
+            # The board checkpoint key moves with the id, so a copy cannot sign as the original instance.
+            if new_signing:
+                if signing:
+                    pairs.append(("previous_signing_key", signing))
+                pairs.append(("signing_key", new_signing))
+            for name, value in pairs:
                 db.execute(
                     "INSERT INTO instance_meta (name, value) VALUES (?, ?)"
                     " ON CONFLICT (name) DO UPDATE SET value = excluded.value",
@@ -113,12 +125,19 @@ def _swap(db_path: Path, confirm: str, new_id: str, new_key: str, *, need_previo
 
 def new_instance_id(db_path: Path, confirm: str) -> tuple[str, str]:
     """Replace the instance id and challenge key; the old ones are kept. Returns (old id, new id)."""
-    return _swap(db_path, confirm, "ah-" + secrets.token_hex(16), secrets.token_hex(32), need_previous=False)
+    return _swap(
+        db_path,
+        confirm,
+        "ah-" + secrets.token_hex(16),
+        secrets.token_hex(32),
+        keys.new_private_key(),
+        need_previous=False,
+    )
 
 
 def restore_instance_id(db_path: Path, confirm: str) -> tuple[str, str]:
     """Swap back to the previous instance id and challenge key. Returns (old id, restored id)."""
-    return _swap(db_path, confirm, "", "", need_previous=True)
+    return _swap(db_path, confirm, "", "", "", need_previous=True)
 
 
 def main(argv: list[str] | None = None) -> int:

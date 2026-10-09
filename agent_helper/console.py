@@ -765,6 +765,13 @@ def build_console(
         return _redirect("/admin/console/board", f"Entry #{seq} purged; its hashes and the reason stay public.")
 
     def verify(request: Request, form: dict[str, str]) -> Response:
+        # Checkpoints first: one recorded while the entries are read is then never ahead of them.
+        checkpoints: list[dict[str, Any]] = []
+        while True:
+            cp_page = store.list_checkpoints(checkpoints[-1]["seq"] if checkpoints else 0, 500)
+            checkpoints += cp_page
+            if len(cp_page) < 500:
+                break
         entries: list[dict[str, Any]] = []
         after = 0
         while True:
@@ -774,17 +781,15 @@ def build_console(
                 break
             after = page[-1]["seq"]
         result = board.verify_chain(entries)
-        checkpoints: list[dict[str, Any]] = []
-        while True:
-            page = store.list_checkpoints(checkpoints[-1]["seq"] if checkpoints else 0, 500)
-            checkpoints += page
-            if len(page) < 500:
-                break
+        if not result.ok:
+            return _redirect(
+                "/admin/console/board", f"Chain broken at #{result.failed_seq}: {result.error}", error=True
+            )
         problems = board.verify_checkpoints(entries, checkpoints, store.instance, store.public_key)
         if problems:
             listed = "; ".join(problems[:5]) + (" …" if len(problems) > 5 else "")
             return _redirect("/admin/console/board", f"Checkpoints contradict the chain: {listed}", error=True)
-        if result.ok and result.warnings:
+        if result.warnings:
             listed = "; ".join(result.warnings[:5]) + (" …" if len(result.warnings) > 5 else "")
             msg = f"Chain verified: {result.checked} entries, but {len(result.warnings)} warning(s): {listed}"
             return _redirect("/admin/console/board", msg, error=True)

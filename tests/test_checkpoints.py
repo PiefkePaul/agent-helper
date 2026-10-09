@@ -116,3 +116,15 @@ def test_expiry_keeps_checkpoints_valid(make_client, monkeypatch):
 
 def test_llms_txt_mentions_checkpoints(client):
     assert "/v1/board/checkpoints" in client.get("/llms.txt").text
+
+
+def test_head_reads_do_not_take_the_write_lock_when_nothing_is_due(make_client):
+    client = make_client(board_checkpoint_seconds=3600)
+    _post(client, "x")  # records the first checkpoint
+    store = client.app.state.store
+    calls = []
+    real = store._tx
+    store._tx = lambda: calls.append(1) or real()
+    client.get("/v1/board/head")
+    client.get("/v1/board/checkpoints")
+    assert calls == []
