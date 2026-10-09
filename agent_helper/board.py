@@ -13,7 +13,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-SCHEME_VERSION = 2  # the newest version; entries keep the version they were written with
+SCHEME_VERSION = 3  # the newest version; entries keep the version they were written with
 GENESIS_HASH = "0" * 64
 
 
@@ -32,11 +32,16 @@ def payload_hash(
     tags: list[str] | None = None,
     expires_at: str | None = None,
     v: int = 1,
+    key_id: str | None = None,
+    signature: str | None = None,
 ) -> str:
-    """Version 1 hashes {author, topic, content}; version 2 adds {tags, expires_at} (docs/decisions/0015)."""
+    """Version 1 hashes {author, topic, content}; version 2 adds {tags, expires_at} (docs/decisions/0015);
+    version 3 adds the author's {key_id, signature} (docs/decisions/0017)."""
     payload: dict[str, Any] = {"author": author, "topic": topic, "content": content}
     if v >= 2:
         payload |= {"tags": tags or [], "expires_at": expires_at}
+    if v >= 3:
+        payload |= {"key_id": key_id, "signature": signature}
     return sha256_hex(canonical_json(payload))
 
 
@@ -94,7 +99,16 @@ def verify_chain(entries: Iterable[Mapping[str, Any]], now: str | None = None) -
         if e.get("expired") and not _valid_expiry(e, now):
             return VerifyResult(False, checked, prev, "entry claims an expiry it cannot have", seq)
         if not e.get("hidden") and not e.get("expired"):
-            actual = payload_hash(e.get("author"), e.get("topic"), e["content"], e.get("tags"), e.get("expires_at"), v)
+            actual = payload_hash(
+                e.get("author"),
+                e.get("topic"),
+                e["content"],
+                e.get("tags"),
+                e.get("expires_at"),
+                v,
+                e.get("key_id"),
+                e.get("signature"),
+            )
             if actual != e["payload_sha256"]:
                 return VerifyResult(False, checked, prev, "payload does not match payload_sha256", seq)
         actual_entry = entry_hash(seq, e["created_at"], e["payload_sha256"], prev, v, e.get("expires_at"))

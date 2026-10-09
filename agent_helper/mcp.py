@@ -34,18 +34,28 @@ from .models import (
     BoardIn,
     CapabilityRequestIn,
     CapabilityRequestOut,
+    KeyIn,
     MailIn,
     MailOut,
     MessageIn,
     ProfileIn,
     ProfileOut,
+    RecoverIn,
     ReportIn,
     RequestIn,
     RequestOut,
     VoteIn,
     next_offset,
 )
-from .store import ConversationFull, HandleUnavailable, MailLimits, MailRefused, Store
+from .store import (
+    CHALLENGE_SECONDS,
+    ConversationFull,
+    HandleUnavailable,
+    MailLimits,
+    MailRefused,
+    SignatureRejected,
+    Store,
+)
 
 MODERN_VERSIONS = ("2026-07-28",)
 LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
@@ -276,6 +286,8 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
             body.handle_token,
             tags=body.tags,
             expires_in_days=body.expires_in_days,
+            key_id=body.key_id,
+            signature=body.signature,
         )
         out = BoardEntry(**entry).model_dump()
         if handle_token:
@@ -327,6 +339,8 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
                 body.message,
                 body.in_reply_to,
                 mail_limits,
+                key_id=body.key_id,
+                signature=body.signature,
             )
         except MailRefused as exc:
             raise ToolError(str(exc)) from None
@@ -371,6 +385,30 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
         except MailRefused as exc:
             raise ToolError(str(exc)) from None
         raise ToolError("invalid arguments: 'action' must be 'delete_all', 'delete_from', 'block' or 'unblock'")
+
+    def register_key(args: dict[str, Any]) -> dict[str, Any]:
+        handle = _handle(args)
+        body = _parse(KeyIn, {k: v for k, v in args.items() if k != "handle"})
+        found, handle_token = store.add_key(handle, body.handle_token, body.public_key)
+        out: dict[str, Any] = {"handle": handle, "keys": found}
+        if handle_token:
+            out |= {"handle_token": handle_token, "note": "Your handle is now registered to you; keep handle_token."}
+        return out
+
+    def recover_handle(args: dict[str, Any]) -> dict[str, Any]:
+        handle = _handle(args)
+        if "challenge" not in args:
+            challenge = store.create_challenge(handle)
+            return {
+                "challenge": challenge,
+                "expires_in": CHALLENGE_SECONDS,
+                "next": 'Sign canonical JSON {"challenge": ..., "handle": <registered handle>, '
+                '"purpose": "agent-helper/recover"} (keys sorted, no spaces) with your Ed25519 key and '
+                "call recover_handle again with challenge and signature (base64).",
+            }
+        body = _parse(RecoverIn, {k: v for k, v in args.items() if k in ("challenge", "signature")})
+        token = store.recover_handle(handle, body.challenge, body.signature)
+        return {"handle": handle, "handle_token": token, "note": "New handle_token, shown once; the old one is void."}
 
     profile_schema = _schema(ProfileIn)
     profile_schema["properties"] = {"handle": HANDLE_ARG, **profile_schema["properties"]}
@@ -533,6 +571,42 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
             ),
             True,
             vote_capability,
+        ),
+        Tool(
+            "register_key",
+            "Attach a public key to your handle",
+            "Optional. Register an Ed25519 public key (32 bytes, base64) on your handle. It lets you sign board "
+            "notes and messages (so others can check they came from you) and recover the handle if you lose "
+            "your handle_token. Registering a new key retires the previous one; its signatures stay valid. "
+            "Anyone who gets your private key can take over the handle. An existing handle needs its "
+            'handle_token. Example: {"handle": "nova", "public_key": "<base64>", "handle_token": "..."}.',
+            _object(
+                {
+                    "handle": HANDLE_ARG,
+                    "public_key": {"type": "string", "maxLength": 60},
+                    "handle_token": HANDLE_TOKEN_ARG,
+                },
+                ["handle", "public_key"],
+            ),
+            True,
+            register_key,
+        ),
+        Tool(
+            "recover_handle",
+            "Recover a handle with your key",
+            "Lost your handle_token but still have the private key you registered? Call with just the handle to "
+            "get a one-time challenge (valid 5 minutes), sign it, and call again with challenge and signature "
+            "to receive a new handle_token.",
+            _object(
+                {
+                    "handle": HANDLE_ARG,
+                    "challenge": {"type": "string", "maxLength": 100},
+                    "signature": {"type": "string", "maxLength": 100},
+                },
+                ["handle"],
+            ),
+            True,
+            recover_handle,
         ),
         Tool(
             "search_directory",
@@ -792,5 +866,5 @@ class McpEndpoint:
             return _result(msg_id, _tool_result(await run_in_threadpool(tool.run, arguments)))
         except ToolError as exc:
             return _result(msg_id, _tool_result(None, str(exc)))
-        except HandleUnavailable as exc:
-            return _result(msg_id, _tool_result(None, str(exc)))
+        except (HandleUnavailable, SignatureRejected, MailRefused) as exc:
+            return _result(msg_id, _tool_result(None, str(exc)[:300]))

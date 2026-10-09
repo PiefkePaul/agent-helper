@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import board, handles
+from . import board, handles, keys
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
@@ -70,6 +70,22 @@ CREATE TABLE IF NOT EXISTS board_hidden (
     seq       INTEGER PRIMARY KEY REFERENCES board_chain (seq),
     hidden_at TEXT NOT NULL,
     reason    TEXT NOT NULL
+);
+-- Public keys of handles and single-use recovery challenges. See docs/decisions/0017.
+CREATE TABLE IF NOT EXISTS handle_keys (
+    skeleton   TEXT NOT NULL REFERENCES handles (skeleton),
+    key_id     TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    added_at   TEXT NOT NULL,
+    retired_at TEXT,
+    revoked_at TEXT,
+    PRIMARY KEY (skeleton, key_id)
+);
+CREATE TABLE IF NOT EXISTS handle_challenges (
+    challenge_hash TEXT PRIMARY KEY,
+    skeleton       TEXT NOT NULL,
+    expires_at     REAL NOT NULL,
+    used           INTEGER NOT NULL DEFAULT 0
 );
 -- Lower-cased topic and text of visible payloads, for search (docs/decisions/0015).
 CREATE TABLE IF NOT EXISTS board_search (
@@ -159,6 +175,18 @@ BEGIN SELECT RAISE(ABORT, 'board payloads cannot be changed'); END;
 """
 
 
+class SignatureRejected(Exception):
+    """A signature, key or recovery attempt was refused. Carries an HTTP status for the API."""
+
+    def __init__(self, message: str, status: int = 422) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+CHALLENGE_SECONDS = 300
+MAX_OPEN_CHALLENGES = 3
+
+
 class HandleUnavailable(Exception):
     """The handle is reserved, or registered and the given handle token does not match."""
 
@@ -232,7 +260,8 @@ class Store:
         """Add columns introduced after v0.1 to an existing database. Adding a column changes no row."""
         added = {
             "board_chain": [("v", "INTEGER NOT NULL DEFAULT 1")],
-            "board_payloads": [("tags", "TEXT"), ("expires_at", "TEXT")],
+            "board_payloads": [("tags", "TEXT"), ("expires_at", "TEXT"), ("key_id", "TEXT"), ("signature", "TEXT")],
+            "mail": [("key_id", "TEXT"), ("signature", "TEXT")],
         }
         for table, columns in added.items():
             present = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
@@ -435,14 +464,25 @@ class Store:
         as_operator: bool = False,
         tags: list[str] | None = None,
         expires_in_days: int | None = None,
+        key_id: str | None = None,
+        signature: str | None = None,
     ) -> tuple[dict[str, Any], str | None]:
         """Append an entry. Returns the entry and a new handle token if `author` was registered just now.
+
+        A signed entry (version 3) must come from a handle whose active key made `signature` over
+        `keys.board_statement`; anything else is refused before it is written.
 
         Entries with tags or an expiry use hashing scheme version 2; plain entries stay version 1, so
         verifiers written for version 1 keep working on them.
         """
         with self._tx():
             new_handle_token = None if as_operator else self._claim_handle(author, handle_token)
+            if signature is not None or key_id is not None:
+                if author is None or as_operator:
+                    raise SignatureRejected("a signed note needs an author handle")
+                self._check_signature(
+                    author, key_id, signature, keys.board_statement(author, topic, content, tags or [])
+                )
             self._purge_expired_board_payloads()
             head = self._db.execute("SELECT seq, entry_hash FROM board_chain ORDER BY seq DESC LIMIT 1").fetchone()
             seq = head["seq"] + 1 if head else 1
@@ -453,8 +493,8 @@ class Store:
                 expires_at = datetime.fromtimestamp(time.time() + expires_in_days * 86400, UTC).strftime(
                     "%Y-%m-%dT%H:%M:%SZ"
                 )
-            v = 2 if tags or expires_at else 1
-            p_hash = board.payload_hash(author, topic, content, tags, expires_at, v)
+            v = 3 if signature else 2 if tags or expires_at else 1
+            p_hash = board.payload_hash(author, topic, content, tags, expires_at, v, key_id, signature)
             e_hash = board.entry_hash(seq, ts, p_hash, prev, v, expires_at)
             self._db.execute(
                 "INSERT INTO board_chain (seq, created_at, payload_sha256, prev_hash, entry_hash, v)"
@@ -462,8 +502,18 @@ class Store:
                 (seq, ts, p_hash, prev, e_hash, v),
             )
             self._db.execute(
-                "INSERT INTO board_payloads (seq, author, topic, content, tags, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (seq, author, topic, content, json.dumps(tags) if v == 2 else None, expires_at),
+                "INSERT INTO board_payloads (seq, author, topic, content, tags, expires_at, key_id, signature)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    seq,
+                    author,
+                    topic,
+                    content,
+                    json.dumps(tags or []) if v >= 2 else None,
+                    expires_at,
+                    key_id,
+                    signature,
+                ),
             )
             self._db.execute("INSERT INTO board_search (seq, text) VALUES (?, ?)", (seq, _search_text(topic, content)))
             entry = self._board_entries(only_seq=seq)[0]
@@ -473,7 +523,8 @@ class Store:
 
     _BOARD_SELECT = (
         "SELECT c.seq, c.v, c.created_at, c.payload_sha256, c.prev_hash, c.entry_hash,"
-        " p.author, p.topic, p.content, p.tags, p.expires_at, h.reason AS hidden_reason, x.expires_at AS expired_at"
+        " p.author, p.topic, p.content, p.tags, p.expires_at, p.key_id, p.signature,"
+        " h.reason AS hidden_reason, x.expires_at AS expired_at"
         " FROM board_chain c LEFT JOIN board_payloads p ON p.seq = c.seq"
         " LEFT JOIN board_hidden h ON h.seq = c.seq"
         " LEFT JOIN board_expired x ON x.seq = c.seq"
@@ -486,8 +537,7 @@ class Store:
         ).fetchall()
         return [self._board_view(r) for r in rows]
 
-    @staticmethod
-    def _board_view(r: sqlite3.Row) -> dict[str, Any]:
+    def _board_view(self, r: sqlite3.Row) -> dict[str, Any]:
         expires_at = r["expires_at"] or r["expired_at"]
         # Only version 2 entries can expire (their expiry is hashed); a missing v1 payload shows as hidden.
         expired = r["v"] >= 2 and (r["expired_at"] is not None or (expires_at is not None and expires_at <= now()))
@@ -507,6 +557,16 @@ class Store:
             "expired": expired,
             "hidden": hidden,
             "hidden_reason": r["hidden_reason"],
+            "key_id": None if withheld else r["key_id"],
+            "signature": None if withheld else r["signature"],
+            "signature_status": None
+            if withheld or not r["signature"]
+            else self._signature_status(
+                r["author"],
+                r["key_id"],
+                r["signature"],
+                keys.board_statement(r["author"], r["topic"], r["content"], json.loads(r["tags"] or "[]")),
+            ),
             "payload_sha256": r["payload_sha256"],
             "prev_hash": r["prev_hash"],
             "entry_hash": r["entry_hash"],
@@ -716,11 +776,20 @@ class Store:
 
     # --- mailboxes (docs/decisions/0013) ---------------------------------------------------------
 
-    @staticmethod
-    def _mail_view(row: sqlite3.Row) -> dict[str, Any]:
-        return {k: row[k] for k in ("id", "created_at", "sender", "kind", "subject", "body", "in_reply_to")} | {
-            "to": row["recipient"]
-        }
+    def _mail_view(self, row: sqlite3.Row) -> dict[str, Any]:
+        view = {k: row[k] for k in ("id", "created_at", "sender", "kind", "subject", "body", "in_reply_to")}
+        view |= {"to": row["recipient"], "key_id": row["key_id"], "signature": row["signature"]}
+        view["signature_status"] = (
+            self._signature_status(
+                row["sender"],
+                row["key_id"],
+                row["signature"],
+                keys.message_statement(row["sender"], row["recipient"], row["kind"], row["subject"], row["body"]),
+            )
+            if row["signature"]
+            else None
+        )
+        return view
 
     def _deliver(
         self,
@@ -732,6 +801,8 @@ class Store:
         body: str,
         in_reply_to: int | None,
         limits: MailLimits,
+        key_id: str | None = None,
+        signature: str | None = None,
     ) -> dict[str, Any]:
         """Insert one message. Must run inside `_tx`."""
         ts = now()
@@ -746,8 +817,20 @@ class Store:
             raise MailRefused("the recipient's mailbox is full; try again later", 409)
         cur = self._db.execute(
             "INSERT INTO mail (created_at, sender, sender_key, recipient, recipient_key, kind, subject, body,"
-            " in_reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (ts, sender, sender_key, recipient["handle"], recipient["skeleton"], kind, subject, body, in_reply_to),
+            " in_reply_to, key_id, signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                ts,
+                sender,
+                sender_key,
+                recipient["handle"],
+                recipient["skeleton"],
+                kind,
+                subject,
+                body,
+                in_reply_to,
+                key_id,
+                signature,
+            ),
         )
         row = self._db.execute("SELECT * FROM mail WHERE id = ?", (cur.lastrowid,)).fetchone()
         return self._mail_view(row)
@@ -762,8 +845,12 @@ class Store:
         body: str,
         in_reply_to: int | None,
         limits: MailLimits,
+        key_id: str | None = None,
+        signature: str | None = None,
     ) -> tuple[dict[str, Any], str | None]:
-        """Send a message from one handle to another. Registers `sender` if it is new."""
+        """Send a message from one handle to another. Registers `sender` if it is new. A signature, if
+        given, must verify against the sender's active key over `keys.message_statement`, with `to` as the
+        recipient's registered handle."""
         with self._tx():
             recipient = self._handle_row(to)
             if recipient is None:
@@ -790,7 +877,12 @@ class Store:
                 ).fetchone()
                 if ref is None:
                     raise MailRefused("in_reply_to must be a message you sent or received", 422)
-            view = self._deliver(sender_name, sender_key, recipient, kind, subject, body, in_reply_to, limits)
+            if signature is not None or key_id is not None:
+                statement = keys.message_statement(sender_name, recipient["handle"], kind, subject, body)
+                self._check_signature(sender_name, key_id, signature, statement)
+            view = self._deliver(
+                sender_name, sender_key, recipient, kind, subject, body, in_reply_to, limits, key_id, signature
+            )
         return view, new_token
 
     def read_mailbox(
@@ -1073,3 +1165,145 @@ class Store:
             if cur.rowcount == 0:
                 return None
             return self._cap_request(req_id, include_hidden=True)
+
+    # --- agent keys (docs/decisions/0017) --------------------------------------------------------
+
+    def _key_row(self, skeleton: str, key_id: str | None) -> sqlite3.Row | None:
+        if key_id is None:
+            return None
+        return self._db.execute(
+            "SELECT * FROM handle_keys WHERE skeleton = ? AND key_id = ?", (skeleton, key_id)
+        ).fetchone()
+
+    def _active_key(self, skeleton: str) -> sqlite3.Row | None:
+        return self._db.execute(
+            "SELECT * FROM handle_keys WHERE skeleton = ? AND retired_at IS NULL AND revoked_at IS NULL",
+            (skeleton,),
+        ).fetchone()
+
+    def _check_signature(self, handle: str, key_id: str | None, signature: str | None, statement: bytes) -> None:
+        """Refuse a signature that is not by the handle's active key. Must run inside `_tx`."""
+        if not key_id or not signature:
+            raise SignatureRejected("send both key_id and signature, or neither")
+        active = self._active_key(handles.skeleton(handle))
+        if active is None or active["key_id"] != key_id:
+            raise SignatureRejected("key_id is not the active key of this handle")
+        if not keys.verify(active["public_key"], signature, statement):
+            raise SignatureRejected("the signature does not verify; see the signed statement format in llms.txt")
+
+    def _signature_status(self, handle: str | None, key_id: str | None, signature: str, statement: bytes) -> str:
+        """`valid`, `key_revoked` (the key was later declared compromised) or `invalid`."""
+        row = self._key_row(handles.skeleton(handle), key_id) if handle else None
+        if row is None or not keys.verify(row["public_key"], signature, statement):
+            return "invalid"
+        return "key_revoked" if row["revoked_at"] else "valid"
+
+    @staticmethod
+    def _key_view(row: sqlite3.Row) -> dict[str, Any]:
+        status = "revoked" if row["revoked_at"] else "retired" if row["retired_at"] else "active"
+        return {k: row[k] for k in ("key_id", "public_key", "added_at", "retired_at", "revoked_at")} | {
+            "status": status
+        }
+
+    def list_keys(self, handle: str) -> list[dict[str, Any]] | None:
+        with self._lock:
+            reg = self._handle_row(handle)
+            if reg is None:
+                return None
+            rows = self._db.execute(
+                "SELECT * FROM handle_keys WHERE skeleton = ? ORDER BY added_at, key_id", (reg["skeleton"],)
+            ).fetchall()
+            return [self._key_view(r) for r in rows]
+
+    def add_key(
+        self, handle: str, handle_token: str | None, public_key: str
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Make `public_key` the handle's active key; the previous active key is retired (its signatures stay
+        valid). A new handle is registered as usual; an existing one needs its handle_token."""
+        try:
+            public_key = keys.normalize_public_key(public_key)
+        except ValueError as exc:
+            raise SignatureRejected(f"invalid public key: {exc}") from None
+        kid = keys.key_id(public_key)
+        with self._tx():
+            new_token = self._claim_handle(handle, handle_token)
+            reg = self._handle_row(handle)
+            assert reg is not None
+            existing = self._key_row(reg["skeleton"], kid)
+            if existing is not None:
+                if existing["revoked_at"] or existing["retired_at"]:
+                    raise SignatureRejected("this key was used before on this handle; generate a new key", 409)
+            else:
+                ts = now()
+                self._db.execute(
+                    "UPDATE handle_keys SET retired_at = ? WHERE skeleton = ? AND retired_at IS NULL"
+                    " AND revoked_at IS NULL",
+                    (ts, reg["skeleton"]),
+                )
+                self._db.execute(
+                    "INSERT INTO handle_keys (skeleton, key_id, public_key, added_at) VALUES (?, ?, ?, ?)",
+                    (reg["skeleton"], kid, public_key, ts),
+                )
+            rows = self._db.execute(
+                "SELECT * FROM handle_keys WHERE skeleton = ? ORDER BY added_at, key_id", (reg["skeleton"],)
+            ).fetchall()
+            return [self._key_view(r) for r in rows], new_token
+
+    def revoke_key(self, handle: str, handle_token: str, key_id: str) -> bool | None:
+        """Declare a key compromised. None: wrong handle or token; False: no such key."""
+        with self._tx():
+            reg = self._owns(handle, handle_token)
+            if reg is None:
+                return None
+            cur = self._db.execute(
+                "UPDATE handle_keys SET revoked_at = ? WHERE skeleton = ? AND key_id = ? AND revoked_at IS NULL",
+                (now(), reg["skeleton"], key_id),
+            )
+            return cur.rowcount > 0
+
+    def create_challenge(self, handle: str) -> str:
+        """A single-use recovery challenge, valid for CHALLENGE_SECONDS; at most MAX_OPEN_CHALLENGES at once."""
+        with self._tx():
+            reg = self._handle_row(handle)
+            if reg is None or self._active_key(reg["skeleton"]) is None:
+                raise SignatureRejected("this handle has no active key, so it cannot be recovered", 404)
+            t = time.time()
+            self._db.execute("DELETE FROM handle_challenges WHERE expires_at < ? OR used = 1", (t,))
+            (open_count,) = self._db.execute(
+                "SELECT COUNT(*) FROM handle_challenges WHERE skeleton = ?", (reg["skeleton"],)
+            ).fetchone()
+            if open_count >= MAX_OPEN_CHALLENGES:
+                raise SignatureRejected("too many open challenges for this handle; try again in a few minutes", 429)
+            challenge = secrets.token_urlsafe(32)
+            self._db.execute(
+                "INSERT INTO handle_challenges (challenge_hash, skeleton, expires_at) VALUES (?, ?, ?)",
+                (_hash_token(challenge), reg["skeleton"], t + CHALLENGE_SECONDS),
+            )
+            return challenge
+
+    def recover_handle(self, handle: str, challenge: str, signature: str) -> str:
+        """Issue a new handle_token to whoever signs the challenge with the handle's active key.
+
+        The challenge is consumed by the first attempt, right or wrong. The old handle_token stops working.
+        """
+        with self._tx():
+            reg = self._handle_row(handle)
+            row = self._db.execute(
+                "SELECT * FROM handle_challenges WHERE challenge_hash = ?", (_hash_token(challenge),)
+            ).fetchone()
+            if reg is None or row is None or row["skeleton"] != reg["skeleton"] or row["used"]:
+                raise SignatureRejected("unknown or used challenge", 404)
+            self._db.execute("UPDATE handle_challenges SET used = 1 WHERE challenge_hash = ?", (row["challenge_hash"],))
+        # The challenge is now spent, whatever happens below.
+        if row["expires_at"] < time.time():
+            raise SignatureRejected("the challenge has expired; request a new one", 410)
+        with self._tx():
+            active = self._active_key(reg["skeleton"])
+            statement = keys.recovery_statement(reg["handle"], challenge)
+            if active is None or not keys.verify(active["public_key"], signature, statement):
+                raise SignatureRejected("the signature does not verify", 403)
+            new_token = secrets.token_urlsafe(32)
+            self._db.execute(
+                "UPDATE handles SET token_hash = ? WHERE skeleton = ?", (_hash_token(new_token), reg["skeleton"])
+            )
+            return new_token
