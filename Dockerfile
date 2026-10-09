@@ -22,6 +22,6 @@ EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=3s CMD python -c "import os,urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ[\"LISTEN_PORT\"]}/healthz', timeout=2)"
 
-# --no-access-log: uvicorn's access log would record client addresses (docs/decisions/0008).
-# --no-proxy-headers: forwarded headers are handled by TRUST_PROXY_HEADERS in the app only.
-CMD ["sh", "-c", "exec uvicorn agent_helper.app:create_app --factory --host 0.0.0.0 --port ${LISTEN_PORT} --no-access-log --no-proxy-headers"]
+# Serves LISTEN_PORT, and ADMIN_PORT if set (only /admin), without uvicorn's access log (it would record
+# client addresses, docs/decisions/0008) and without uvicorn's proxy-header handling.
+CMD ["python", "-m", "agent_helper.serve"]

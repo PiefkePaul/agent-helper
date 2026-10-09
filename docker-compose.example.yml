@@ -7,6 +7,9 @@ services:
       - app.env            # derived from config/app.env.example, kept outside the repository
     ports:
       - "127.0.0.1:8080:8080"   # expose only to the local reverse proxy, which terminates TLS
+      # Admin API and console (ADMIN_PORT=8081 in app.env): on the host's loopback only, reached by
+      # `ssh -L 8081:127.0.0.1:8081 <host>`. Never point the reverse proxy at this port.
+      - "127.0.0.1:8081:8081"
     volumes:
       - agent-helper-data:/data
     read_only: true

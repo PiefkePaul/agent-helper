@@ -292,3 +292,28 @@ def test_default_admin_nets_are_loopback_only():
     assert not address_allowed("203.0.113.7", nets) and not address_allowed("2001:db8::1", nets)
     assert not address_allowed("testclient", nets)
     assert address_allowed("anything", parse_networks("any"))
+
+
+def test_separate_admin_port(make_client):
+    # The test client talks to port 80.
+    on_admin = make_client(peer=PUBLIC, admin_port=80, admin_allowed_nets="127.0.0.0/8")
+    assert _admin(on_admin) == 200  # the source address does not matter on the admin port
+    assert on_admin.get("/admin/login").status_code == 200
+    assert on_admin.get("/llms.txt").status_code == 404  # nothing public on the admin port
+    assert on_admin.post("/v1/requests", json={"message": "x"}).status_code == 404
+
+    public = make_client(peer="127.0.0.1", admin_port=8081, admin_allowed_nets="any")
+    assert _admin(public) == 404  # no /admin on the public port, whatever the networks say
+    assert public.get("/admin/login").status_code == 404
+    assert public.get("/llms.txt").status_code == 200
+
+
+def test_serve_binds_both_ports():
+    from agent_helper.serve import bind
+
+    a, b = bind(0, "127.0.0.1"), bind(0, "127.0.0.1")
+    try:
+        assert a.getsockname()[1] != b.getsockname()[1]
+    finally:
+        a.close()
+        b.close()

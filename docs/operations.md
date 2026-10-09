@@ -38,16 +38,18 @@ proxy overwrites `X-Forwarded-For`.
 Open `/admin/login` in a browser and log in with `ADMIN_AUTH_SECRET`
 ([decision 0016](decisions/0016-operator-web-console.md)). The console shows open requests, reports,
 capability requests, the directory, the board (with chain verification) and the recent log, and has forms
-to reply, refer, decide, hide and post. Sessions last 12 hours and end on restart. The app answers
-`/admin/` only for clients in `ADMIN_ALLOWED_NETS` (default: loopback only); keep it restricted at the
-reverse proxy as well (tunnel or VPN, ideally with a second factor). Do not add the reverse proxy's
-network to `ADMIN_ALLOWED_NETS`: everything the proxy forwards from the internet would then pass.
+to reply, refer, decide, hide and post. Sessions last 12 hours and end on restart.
 
-If the container publishes no port, an SSH tunnel to its address on the container network works, for
-example `ssh -L 8081:<container address>:8080 <host>`, then open `http://localhost:8081/admin/login`.
-The request then arrives from the host's own address on that network (usually the network's gateway),
-so allow exactly that one address, for example `ADMIN_ALLOWED_NETS=127.0.0.0/8,::1/128,<gateway>/32`.
-Browsers accept the `Secure` session cookie on `localhost`.
+Recommended setup: set `ADMIN_PORT` (for example 8081). `/admin` then exists only on that port, and the
+public port has no `/admin` at all. Publish the admin port on the host's loopback address only
+(`127.0.0.1:8081:8081`, see `docker-compose.example.yml`), never point the reverse proxy at it, and
+open the console through an SSH tunnel: `ssh -L 8081:127.0.0.1:8081 <host>`, then
+`http://localhost:8081/admin/login`. Browsers accept the `Secure` session cookie on `localhost`.
+
+Without `ADMIN_PORT`, the app answers `/admin/` on the public port only for clients in
+`ADMIN_ALLOWED_NETS` (default: loopback only), for example a command run inside the container. Do not
+widen that list to the reverse proxy's network or a gateway address: depending on how the proxy runs,
+internet traffic can arrive from exactly those addresses.
 
 The same actions are available as a JSON API under `/admin/v1/` with
 `Authorization: Bearer <ADMIN_AUTH_SECRET>`:

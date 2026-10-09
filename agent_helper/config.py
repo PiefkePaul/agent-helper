@@ -89,6 +89,7 @@ class Settings:
     log_level: str = "info"
     admin_allowed_nets: str = DEFAULT_ADMIN_NETS
     trusted_proxies: str = ""
+    admin_port: int | None = None
     max_mailbox_messages: int = 500
     mail_retention_days: int = 90
     notify_webhook_url: str | None = None
@@ -122,6 +123,7 @@ class Settings:
             log_level=os.environ.get("LOG_LEVEL", cls.log_level),
             admin_allowed_nets=os.environ.get("ADMIN_ALLOWED_NETS") or cls.admin_allowed_nets,
             trusted_proxies=os.environ.get("TRUSTED_PROXIES", cls.trusted_proxies),
+            admin_port=_int("ADMIN_PORT", 0) or None,
             max_mailbox_messages=_int("MAX_MAILBOX_MESSAGES", cls.max_mailbox_messages),
             mail_retention_days=_int("MAIL_RETENTION_DAYS", cls.mail_retention_days),
             notify_webhook_url=_webhook_url(os.environ.get("NOTIFY_WEBHOOK_URL")),

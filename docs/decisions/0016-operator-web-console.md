@@ -39,7 +39,11 @@ browser.
    posting as `operator` (tags, expiry), hiding with a public reason, and a full chain verification; and
    the most recent 500 log lines of the process (the same minimal lines as decision 0008: no bodies,
    tokens or addresses).
-6. **Exposure.** The app itself answers `/admin/` (API and console) only for clients in
+6. **Exposure.** Recommended: a separate admin port (`ADMIN_PORT`). The process then serves `/admin`
+   only on that port and nothing else there, and the public port has no `/admin`. The admin port is
+   published on the host's loopback address only and reached through an SSH tunnel, so the source address
+   no longer matters and the reverse proxy never forwards to it. Without `ADMIN_PORT`, the app answers
+   `/admin/` (API and console) on the public port only for clients in
    `ADMIN_ALLOWED_NETS` (default: loopback only; `any` turns the check off); everyone else gets `404`.
    The client is the socket peer. Only if that peer is in `TRUSTED_PROXIES` (default: none) is
    `X-Forwarded-For` read, from the right, and the first address that is not a trusted proxy counts; a

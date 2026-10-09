@@ -170,9 +170,11 @@ class GuardMiddleware:
         self_limited_paths: frozenset[str] = frozenset(),
         admin_networks: Networks | None = None,
         trusted_proxies: Networks = (),
+        admin_port: int | None = None,
     ) -> None:
         self.admin_networks = admin_networks
         self.trusted_proxies = trusted_proxies
+        self.admin_port = admin_port
         self.app = app
         self.max_body_bytes = max_body_bytes
         self.read_limiter = read_limiter
@@ -182,6 +184,16 @@ class GuardMiddleware:
         # Endpoints that tell reads from writes only after parsing the body (the MCP endpoint). They are
         # charged as reads here and charge writes themselves.
         self.self_limited_paths = self_limited_paths
+
+    def _admin_refused(self, scope: Scope, is_admin_path: bool) -> bool:
+        """With a separate admin port, /admin exists only there and nothing else does; which address the
+        request comes from no longer matters (the port is published on the host's loopback only). Without
+        one, /admin is limited to ADMIN_ALLOWED_NETS."""
+        if self.admin_port is not None:
+            server = scope.get("server")
+            on_admin_port = server is not None and server[1] == self.admin_port
+            return is_admin_path != on_admin_port
+        return is_admin_path and not address_allowed(admin_client(scope, self.trusted_proxies), self.admin_networks)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -197,10 +209,8 @@ class GuardMiddleware:
             log.info("%s %s %s %.0fms", method, _loggable(scope["path"]), status_holder["status"], ms)
 
         path = scope["path"]
-        if (path == "/admin" or path.startswith("/admin/")) and not address_allowed(
-            admin_client(scope, self.trusted_proxies), self.admin_networks
-        ):
-            # The admin API and console do not exist for clients outside ADMIN_ALLOWED_NETS.
+        if self._admin_refused(scope, path == "/admin" or path.startswith("/admin/")):
+            # The admin API and console do not exist on this port or for this client.
             status_holder["status"] = 404
             await _send_json(send, 404, {"detail": "Not Found"}, [])
             done()
