@@ -190,15 +190,20 @@ def test_failed_recovery_still_spends_the_challenge(client, nova):
     assert client.post("/v1/handles/nova/recover", json={"challenge": challenge, "signature": right}).status_code == 404
 
 
-def test_challenges_expire_and_are_limited(client, nova, monkeypatch):
+def test_challenges_expire_and_a_flood_cannot_block_recovery(client, nova, monkeypatch):
     challenges = [client.post("/v1/handles/nova/recovery-challenges").json()["challenge"] for _ in range(3)]
-    assert client.post("/v1/handles/nova/recovery-challenges").status_code == 429
+    # A fourth evicts the oldest instead of being refused.
+    newest = client.post("/v1/handles/nova/recovery-challenges").json()["challenge"]
+    sig = nova.sign(keys.recovery_statement("nova", challenges[0]))
+    assert (
+        client.post("/v1/handles/nova/recover", json={"challenge": challenges[0], "signature": sig}).status_code == 404
+    )
+    challenges = challenges[1:] + [newest]
     real = store_module.time.time
     monkeypatch.setattr(store_module.time, "time", lambda: real() + store_module.CHALLENGE_SECONDS + 1)
     signature = nova.sign(keys.recovery_statement("nova", challenges[0]))
     r = client.post("/v1/handles/nova/recover", json={"challenge": challenges[0], "signature": signature})
     assert r.status_code == 410
-    # Expired challenges no longer count towards the limit.
     assert client.post("/v1/handles/nova/recovery-challenges").status_code == 200
 
 
@@ -247,3 +252,54 @@ def test_mcp_key_tools(client):
     assert posted["signature_status"] == "valid"
     bad = call(client, "register_key", {"handle": "vega", "public_key": agent.public})
     assert bad["isError"] is True
+
+
+@pytest.mark.parametrize(
+    "raw_hex",
+    [
+        "00" * 32,  # small order
+        "01" + "00" * 31,  # identity
+        "ec" + "ff" * 30 + "7f",  # order 2
+        "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",  # order 8
+        "ed" + "ff" * 30 + "7f",  # y = p, not canonical
+    ],
+)
+def test_weak_public_keys_are_refused(client, raw_hex):
+    key = base64.b64encode(bytes.fromhex(raw_hex)).decode()
+    r = client.post("/v1/handles/weak/keys", json={"public_key": key})
+    assert r.status_code == 422
+
+
+def test_forgery_with_a_small_order_key_is_impossible():
+    # R = identity, S = 0 verifies under small-order keys; such keys can no longer be registered.
+    assert keys.is_weak_public_key(bytes.fromhex("01" + "00" * 31))
+    for _ in range(20):
+        assert not keys.is_weak_public_key(base64.b64decode(Agent().public))
+
+
+def test_registered_handle_spelling_is_returned_and_used(client):
+    agent = Agent()
+    _register(client, "Nova", agent)
+    assert client.get("/v1/handles/nova/keys").json()["handle"] == "Nova"
+    r = client.post("/v1/handles/nova/recovery-challenges").json()
+    assert r["statement"]["handle"] == "Nova"
+    sig = agent.sign(keys.recovery_statement("Nova", r["challenge"]))
+    assert (
+        client.post("/v1/handles/nova/recover", json={"challenge": r["challenge"], "signature": sig}).status_code == 200
+    )
+
+
+def test_signatures_are_stored_canonically(client, nova):
+    stmt = keys.board_statement("nova", None, "url-safe", [])
+    urlsafe = base64.urlsafe_b64encode(nova.private.sign(stmt)).decode().rstrip("=")
+    body = {
+        "content": "url-safe",
+        "author": "nova",
+        "handle_token": nova.token,
+        "key_id": nova.key_id,
+        "signature": urlsafe,
+    }
+    entry = client.post("/v1/board", json=body).json()
+    assert entry["signature"] == base64.b64encode(nova.private.sign(stmt)).decode()
+    assert entry["signature_status"] == "valid"
+    assert verify_chain(client.get("/v1/board").json()).ok

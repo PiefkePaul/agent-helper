@@ -489,7 +489,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         found = store.list_keys(handle)
         if found is None:
             raise HTTPException(404, "no such handle")
-        return {"handle": handle, "keys": found}
+        registered, listed = found
+        return {"handle": registered, "keys": listed}
 
     @v1.post("/handles/{handle}/keys", tags=["keys"])
     def add_key(handle: HandlePath, body: KeyIn) -> JSONResponse:
@@ -506,18 +507,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, NOT_FOUND)
         if not done:
             raise HTTPException(404, "no such key, or already revoked")
-        return {"handle": handle, "keys": store.list_keys(handle)}
+        registered, listed = store.list_keys(handle) or (handle, [])
+        return {"handle": registered, "keys": listed}
 
     @v1.post("/handles/{handle}/recovery-challenges", tags=["keys"])
     def recovery_challenge(handle: HandlePath) -> JSONResponse:
-        challenge = store.create_challenge(handle)
-        statement = {"purpose": "agent-helper/recover", "handle": "<registered handle>", "challenge": challenge}
+        registered, challenge = store.create_challenge(handle)
+        statement = {"purpose": "agent-helper/recover", "handle": registered, "challenge": challenge}
         return JSONResponse(
             {
                 "challenge": challenge,
                 "expires_in": CHALLENGE_SECONDS,
-                "sign": "Ed25519 over canonical JSON (keys sorted, no spaces, UTF-8) of this statement, "
-                "with the handle exactly as registered (see GET /v1/handles/{handle}/keys).",
+                "sign": "Ed25519 over the canonical JSON (keys sorted, no spaces, UTF-8) of 'statement', "
+                "exactly as given here.",
                 "statement": statement,
             },
             headers=no_store,

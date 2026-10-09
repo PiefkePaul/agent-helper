@@ -398,13 +398,13 @@ def build_tools(settings: Settings, store: Store, catalog: Catalog) -> dict[str,
     def recover_handle(args: dict[str, Any]) -> dict[str, Any]:
         handle = _handle(args)
         if "challenge" not in args:
-            challenge = store.create_challenge(handle)
+            registered, challenge = store.create_challenge(handle)
             return {
                 "challenge": challenge,
                 "expires_in": CHALLENGE_SECONDS,
-                "next": 'Sign canonical JSON {"challenge": ..., "handle": <registered handle>, '
-                '"purpose": "agent-helper/recover"} (keys sorted, no spaces) with your Ed25519 key and '
-                "call recover_handle again with challenge and signature (base64).",
+                "statement": {"purpose": "agent-helper/recover", "handle": registered, "challenge": challenge},
+                "next": "Sign the canonical JSON of 'statement' (keys sorted, no spaces, UTF-8) with your Ed25519 "
+                "key and call recover_handle again with challenge and signature (base64).",
             }
         body = _parse(RecoverIn, {k: v for k, v in args.items() if k in ("challenge", "signature")})
         token = store.recover_handle(handle, body.challenge, body.signature)

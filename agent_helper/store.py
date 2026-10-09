@@ -480,7 +480,7 @@ class Store:
             if signature is not None or key_id is not None:
                 if author is None or as_operator:
                     raise SignatureRejected("a signed note needs an author handle")
-                self._check_signature(
+                signature = self._check_signature(
                     author, key_id, signature, keys.board_statement(author, topic, content, tags or [])
                 )
             self._purge_expired_board_payloads()
@@ -879,7 +879,7 @@ class Store:
                     raise MailRefused("in_reply_to must be a message you sent or received", 422)
             if signature is not None or key_id is not None:
                 statement = keys.message_statement(sender_name, recipient["handle"], kind, subject, body)
-                self._check_signature(sender_name, key_id, signature, statement)
+                signature = self._check_signature(sender_name, key_id, signature, statement)
             view = self._deliver(
                 sender_name, sender_key, recipient, kind, subject, body, in_reply_to, limits, key_id, signature
             )
@@ -1181,15 +1181,21 @@ class Store:
             (skeleton,),
         ).fetchone()
 
-    def _check_signature(self, handle: str, key_id: str | None, signature: str | None, statement: bytes) -> None:
-        """Refuse a signature that is not by the handle's active key. Must run inside `_tx`."""
+    def _check_signature(self, handle: str, key_id: str | None, signature: str | None, statement: bytes) -> str:
+        """Refuse a signature that is not by the handle's active key; return it in canonical base64, the form
+        that is stored and hashed. Must run inside `_tx`."""
         if not key_id or not signature:
             raise SignatureRejected("send both key_id and signature, or neither")
+        try:
+            signature = keys.normalize_signature(signature)
+        except ValueError as exc:
+            raise SignatureRejected(f"invalid signature: {exc}") from None
         active = self._active_key(handles.skeleton(handle))
         if active is None or active["key_id"] != key_id:
             raise SignatureRejected("key_id is not the active key of this handle")
         if not keys.verify(active["public_key"], signature, statement):
             raise SignatureRejected("the signature does not verify; see the signed statement format in llms.txt")
+        return signature
 
     def _signature_status(self, handle: str | None, key_id: str | None, signature: str, statement: bytes) -> str:
         """`valid`, `key_revoked` (the key was later declared compromised) or `invalid`."""
@@ -1205,7 +1211,8 @@ class Store:
             "status": status
         }
 
-    def list_keys(self, handle: str) -> list[dict[str, Any]] | None:
+    def list_keys(self, handle: str) -> tuple[str, list[dict[str, Any]]] | None:
+        """The handle as registered (the form signatures use) and its keys."""
         with self._lock:
             reg = self._handle_row(handle)
             if reg is None:
@@ -1213,7 +1220,7 @@ class Store:
             rows = self._db.execute(
                 "SELECT * FROM handle_keys WHERE skeleton = ? ORDER BY added_at, key_id", (reg["skeleton"],)
             ).fetchall()
-            return [self._key_view(r) for r in rows]
+            return reg["handle"], [self._key_view(r) for r in rows]
 
     def add_key(
         self, handle: str, handle_token: str | None, public_key: str
@@ -1261,7 +1268,7 @@ class Store:
             )
             return cur.rowcount > 0
 
-    def create_challenge(self, handle: str) -> str:
+    def create_challenge(self, handle: str) -> tuple[str, str]:
         """A single-use recovery challenge, valid for CHALLENGE_SECONDS; at most MAX_OPEN_CHALLENGES at once."""
         with self._tx():
             reg = self._handle_row(handle)
@@ -1273,13 +1280,18 @@ class Store:
                 "SELECT COUNT(*) FROM handle_challenges WHERE skeleton = ?", (reg["skeleton"],)
             ).fetchone()
             if open_count >= MAX_OPEN_CHALLENGES:
-                raise SignatureRejected("too many open challenges for this handle; try again in a few minutes", 429)
+                # Evict the oldest instead of refusing, so nobody can block recovery by asking for challenges.
+                self._db.execute(
+                    "DELETE FROM handle_challenges WHERE challenge_hash IN (SELECT challenge_hash FROM"
+                    " handle_challenges WHERE skeleton = ? ORDER BY expires_at LIMIT ?)",
+                    (reg["skeleton"], open_count - MAX_OPEN_CHALLENGES + 1),
+                )
             challenge = secrets.token_urlsafe(32)
             self._db.execute(
                 "INSERT INTO handle_challenges (challenge_hash, skeleton, expires_at) VALUES (?, ?, ?)",
                 (_hash_token(challenge), reg["skeleton"], t + CHALLENGE_SECONDS),
             )
-            return challenge
+            return reg["handle"], challenge
 
     def recover_handle(self, handle: str, challenge: str, signature: str) -> str:
         """Issue a new handle_token to whoever signs the challenge with the handle's active key.
