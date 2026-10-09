@@ -229,6 +229,17 @@ BEGIN SELECT RAISE(ABORT, 'checkpoints cannot be changed'); END;
 CREATE TRIGGER IF NOT EXISTS board_checkpoints_no_delete BEFORE DELETE ON board_checkpoints
 BEGIN SELECT RAISE(ABORT, 'checkpoints cannot be deleted'); END;
 
+-- When the service first published each revocation of one of its signing keys (docs/decisions/0022).
+-- Append-only: verifiers weigh copies by recorded_at, since `since` is only the operator's statement.
+CREATE TABLE IF NOT EXISTS key_revocations (
+    key_id      TEXT PRIMARY KEY,
+    recorded_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS key_revocations_no_update BEFORE UPDATE ON key_revocations
+BEGIN SELECT RAISE(ABORT, 'revocation records cannot be changed'); END;
+CREATE TRIGGER IF NOT EXISTS key_revocations_no_delete BEFORE DELETE ON key_revocations
+BEGIN SELECT RAISE(ABORT, 'revocation records cannot be deleted'); END;
+
 CREATE TRIGGER IF NOT EXISTS board_payloads_no_update BEFORE UPDATE ON board_payloads
 BEGIN SELECT RAISE(ABORT, 'board payloads cannot be changed'); END;
 """
@@ -385,8 +396,11 @@ class Store:
         # REVOKED_KEY_IDS lives in the configuration, so it survives restoring an older database.
         if any(kid == self.key_id for kid, _ in revoked_key_ids):
             raise SystemExit("the current signing key is listed in REVOKED_KEY_IDS; move to a new key first")
+        started = now()
         for kid, given in revoked_key_ids:
-            since = given or now()
+            since = given or started
+            if given:
+                self._check_revocation_time(kid, given, started)
             reason = "REVOKED_KEY_IDS" if given else "REVOKED_KEY_IDS without a date; revoked from the service start"
             # Unknown here (for example a key of a database that was replaced): still published as revoked,
             # with an empty public_key, so verifiers ignore checkpoints that claim it.
@@ -399,7 +413,27 @@ class Store:
             " ON CONFLICT (name) DO UPDATE SET value = excluded.value",
             (json.dumps(registry, sort_keys=True),),
         )
-        self.other_keys = registry
+        # The service publishes the key list from now on: the first time it does so for a revocation is
+        # its recorded_at, kept for good.
+        for kid, entry in registry.items():
+            if entry.get("status") == "revoked":
+                self._db.execute(
+                    "INSERT OR IGNORE INTO key_revocations (key_id, recorded_at) VALUES (?, ?)", (kid, started)
+                )
+        recorded = dict(self._db.execute("SELECT key_id, recorded_at FROM key_revocations").fetchall())
+        self.other_keys = {
+            kid: entry | ({"recorded_at": recorded[kid]} if kid in recorded else {}) for kid, entry in registry.items()
+        }
+
+    def _check_revocation_time(self, kid: str, since: str, started: str) -> None:
+        """A configured revocation time must lie between the key's first known use and now."""
+        if since > started:
+            raise SystemExit(f"REVOKED_KEY_IDS: the time for {kid} is in the future")
+        row = self._db.execute("SELECT MIN(time) AS first FROM board_checkpoints WHERE key_id = ?", (kid,)).fetchone()
+        if row["first"] is not None and since < row["first"]:
+            raise SystemExit(
+                f"REVOKED_KEY_IDS: the time for {kid} is before the key's first checkpoint ({row['first']})"
+            )
 
     def _meta_value(self, name: str) -> str | None:
         row = self._db.execute("SELECT value FROM instance_meta WHERE name = ?", (name,)).fetchone()

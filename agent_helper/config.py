@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -107,9 +108,13 @@ def _key_ids(raw: str) -> tuple[tuple[str, str | None], ...]:
         kid, _, since = part.partition("@")
         kid = kid.strip().lower()
         valid = len(kid) == 16 and all(c in "0123456789abcdef" for c in kid)
+        since = since.strip()
         if since:
+            # Exactly one form: ASCII digits and an upper-case Z (strptime alone would also take a "z").
             try:
-                datetime.strptime(since.strip(), "%Y-%m-%dT%H:%M:%SZ")
+                if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", since):
+                    raise ValueError
+                since = datetime.strptime(since, "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%dT%H:%M:%SZ")
             except ValueError:
                 valid = False
         if not valid:
@@ -117,7 +122,7 @@ def _key_ids(raw: str) -> tuple[tuple[str, str | None], ...]:
                 "REVOKED_KEY_IDS must list key ids of 16 hex digits, each optionally @YYYY-MM-DDTHH:MM:SSZ; "
                 f"not valid: {part[:40]!r}"
             )
-        out.append((kid, since.strip() or None))
+        out.append((kid, since or None))
     return tuple(out)
 
 

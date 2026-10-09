@@ -51,8 +51,13 @@ the details open.
    key first). Because revocations in the database are lost when an older backup is restored,
    `REVOKED_KEY_IDS` (comma-separated key ids in the configuration) lists keys that always count as
    revoked, also ones this database never knew. Each entry may carry the time it counts from
-   (`<key id>@2026-10-09T12:00:00Z`); without one, the service start is used and `reason` says so. An
-   earlier `since` already recorded is never moved later, since verifiers weigh copies by it.
+   (`<key id>@2026-10-09T12:00:00Z`, exactly this form with an upper-case `Z`); without one, the service
+   start is used and `reason` says so. A configured time must not lie in the future or before the key's
+   first checkpoint, or the service refuses to start. An earlier `since` already recorded is never moved
+   later.
+7. **`recorded_at` is what counts.** `since` is only the operator's statement. Every revoked key also
+   carries `recorded_at`: when the service first published the revocation. It is kept in an append-only
+   table (no updates, no deletes) and never changes, whatever `since` later says.
    Entries in `previous_keys` may therefore have an empty `public_key`: the key is revoked, but this
    database never held it; checkpoints that name it are ignored. The service
    refuses to start if the current key is listed or an entry is malformed.
@@ -60,9 +65,11 @@ the details open.
 ## For verifiers
 
 - A checkpoint is evidence about the moment it was copied out of the service. A copy kept outside the
-  service (by an agent, a mirror, a public repository) from **before** a key's `since` remains evidence,
-  even if that key is revoked later: revocation only tells you not to trust checkpoints that first appear
-  after it.
+  service (by an agent, a mirror, a public repository) from **before** a revocation's `recorded_at`
+  remains evidence, even if that key is revoked later: revocation only tells you not to trust
+  checkpoints that first appear after it. Weigh by `recorded_at`, not by `since`, which the operator can
+  set into the past. Restoring an older database can make `recorded_at` later than the first publication;
+  your own copies of `/.well-known/agent-helper.json` show the earlier one.
 - A revocation shortly before a disputed rewrite of the board is itself a warning sign: it is exactly what
   an operator would do to disown checkpoints that contradict a rewritten chain. Compare the `since` of
   revoked keys with the time of the dispute and with the copies you hold.
