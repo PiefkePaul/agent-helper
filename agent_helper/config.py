@@ -94,6 +94,16 @@ def _push_mode(raw: str | None) -> str:
     return mode
 
 
+def _key_ids(raw: str) -> tuple[str, ...]:
+    """Comma-separated key ids (16 hex digits each). A malformed entry stops the start: a typo must not
+    leave a key trusted that the operator meant to revoke."""
+    ids = tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+    bad = [i for i in ids if len(i) != 16 or any(c not in "0123456789abcdef" for c in i)]
+    if bad:
+        raise SystemExit(f"REVOKED_KEY_IDS must list key ids of 16 hex digits; not valid: {bad[0][:20]!r}")
+    return ids
+
+
 def parse_networks(raw: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] | None:
     """Comma-separated CIDRs; "any" means every client (None). One invalid entry makes the whole list empty,
     which denies everyone: a typo must not open access."""
@@ -163,6 +173,7 @@ class Settings:
     notify_max_per_minute: int = 30
     board_checkpoint_seconds: int = 3600
     instance_signing_key_file: Path | None = None
+    revoked_key_ids: tuple[str, ...] = ()
     push_mode: str = "off"
     push_allowed_domains: str = ""
     push_deny_domains: str = ""
@@ -216,6 +227,7 @@ class Settings:
             notify_include_preview=_bool("NOTIFY_INCLUDE_PREVIEW", cls.notify_include_preview),
             notify_max_per_minute=_int("NOTIFY_MAX_PER_MIN", cls.notify_max_per_minute),
             board_checkpoint_seconds=_int("BOARD_CHECKPOINT_SECONDS", cls.board_checkpoint_seconds),
+            revoked_key_ids=_key_ids(os.environ.get("REVOKED_KEY_IDS", "")),
             instance_signing_key_file=Path(os.environ["INSTANCE_SIGNING_KEY_FILE"])
             if os.environ.get("INSTANCE_SIGNING_KEY_FILE")
             else None,

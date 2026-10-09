@@ -345,6 +345,7 @@ class Store:
         on_event: EventHook = _no_events,
         checkpoint_seconds: int = 3600,
         signing_key_file: Path | None = None,
+        revoked_key_ids: tuple[str, ...] = (),
     ) -> None:
         self._on_event = on_event
         self._checkpoint_seconds = checkpoint_seconds
@@ -381,6 +382,17 @@ class Store:
         self.public_key = keys.public_key_of(self._signing_key)
         self.key_id = keys.key_id(self.public_key)
         registry.pop(self.key_id, None)  # the current key is never a previous one
+        # REVOKED_KEY_IDS lives in the configuration, so it survives restoring an older database.
+        if self.key_id in revoked_key_ids:
+            raise SystemExit("the current signing key is listed in REVOKED_KEY_IDS; move to a new key first")
+        for kid in revoked_key_ids:
+            entry = registry.get(kid)
+            if entry is None:
+                # Unknown here (for example a key of a database that was replaced): still published as
+                # revoked, so verifiers ignore checkpoints that claim it.
+                registry[kid] = {"public_key": "", "status": "revoked", "since": now(), "reason": "REVOKED_KEY_IDS"}
+            elif entry["status"] != "revoked":
+                registry[kid] = entry | {"status": "revoked", "since": now(), "reason": "REVOKED_KEY_IDS"}
         self._db.execute(
             "INSERT INTO instance_meta (name, value) VALUES ('previous_keys', ?)"
             " ON CONFLICT (name) DO UPDATE SET value = excluded.value",

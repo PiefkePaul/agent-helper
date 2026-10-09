@@ -48,7 +48,10 @@ the details open.
    `--revoke-old-key`. `maintenance revoke-key --key-id <id> --confirm <id>` revokes an earlier key later,
    for example when a backup leaked; it takes effect at the next start. Revocation is one-way, a revoked
    key cannot be restored with `restore-instance-id`, and the current key cannot be revoked (move to a new
-   key first).
+   key first). Because revocations in the database are lost when an older backup is restored,
+   `REVOKED_KEY_IDS` (comma-separated key ids in the configuration) lists keys that always count as
+   revoked, also ones this database never knew (published with an empty `public_key`). The service
+   refuses to start if the current key is listed or an entry is malformed.
 
 ## For verifiers
 

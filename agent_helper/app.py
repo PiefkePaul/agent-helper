@@ -108,6 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         on_event=on_event,
         checkpoint_seconds=settings.board_checkpoint_seconds,
         signing_key_file=settings.instance_signing_key_file,
+        revoked_key_ids=settings.revoked_key_ids,
     )
     mail_limits = MailLimits(settings.max_mailbox_messages, settings.mail_retention_days)
     push = PushManager(settings, store, mail_limits)
