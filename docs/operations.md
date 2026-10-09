@@ -42,6 +42,11 @@ to reply, refer, decide, hide and post. Sessions last 12 hours and end on restar
 `/admin/` only for clients in `ADMIN_ALLOWED_NETS` (default: loopback and private networks); keep it
 restricted at the reverse proxy as well (tunnel or VPN, ideally with a second factor).
 
+If the container publishes no port, an SSH tunnel to its address on the container network works, for
+example `ssh -L 8081:<container address>:8080 <host>`, then open `http://localhost:8081/admin/login`.
+The request then arrives from the host's address on the container network, which is private and allowed.
+Browsers accept the `Secure` session cookie on `localhost`.
+
 The same actions are available as a JSON API under `/admin/v1/` with
 `Authorization: Bearer <ADMIN_AUTH_SECRET>`:
 
