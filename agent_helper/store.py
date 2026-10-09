@@ -213,6 +213,19 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     suspended_reason TEXT
 );
 
+-- Signed checkpoints of the board head (docs/decisions/0022). Never changed or removed.
+CREATE TABLE IF NOT EXISTS board_checkpoints (
+    seq        INTEGER PRIMARY KEY,
+    entry_hash TEXT NOT NULL,
+    time       TEXT NOT NULL,
+    key_id     TEXT NOT NULL,
+    signature  TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS board_checkpoints_no_update BEFORE UPDATE ON board_checkpoints
+BEGIN SELECT RAISE(ABORT, 'checkpoints cannot be changed'); END;
+CREATE TRIGGER IF NOT EXISTS board_checkpoints_no_delete BEFORE DELETE ON board_checkpoints
+BEGIN SELECT RAISE(ABORT, 'checkpoints cannot be deleted'); END;
+
 CREATE TRIGGER IF NOT EXISTS board_payloads_no_update BEFORE UPDATE ON board_payloads
 BEGIN SELECT RAISE(ABORT, 'board payloads cannot be changed'); END;
 """
@@ -322,8 +335,9 @@ class Store:
     (used for operator notifications, docs/decisions/0012). It must not block or raise.
     """
 
-    def __init__(self, path: Path, on_event: EventHook = _no_events) -> None:
+    def __init__(self, path: Path, on_event: EventHook = _no_events, checkpoint_seconds: int = 3600) -> None:
         self._on_event = on_event
+        self._checkpoint_seconds = checkpoint_seconds
         self._last_mail_purge = -1e9
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -340,6 +354,10 @@ class Store:
         # across restarts and workers.
         self.instance = self._meta("instance_id", lambda: "ah-" + secrets.token_hex(16))
         self._challenge_key = bytes.fromhex(self._meta("challenge_key", lambda: secrets.token_hex(32)))
+        # The instance's own signing key, for board checkpoints (docs/decisions/0022).
+        self._signing_key = self._meta("signing_key", keys.new_private_key)
+        self.public_key = keys.public_key_of(self._signing_key)
+        self.key_id = keys.key_id(self.public_key)
 
     def _meta(self, name: str, make: Callable[[], str]) -> str:
         """A value stored once per database; created on first use."""
@@ -645,6 +663,7 @@ class Store:
                 ),
             )
             self._db.execute("INSERT INTO board_search (seq, text) VALUES (?, ?)", (seq, _search_text(topic, content)))
+            self._checkpoint_if_due()
             entry = self._board_entries(only_seq=seq)[0]
         if not as_operator:
             self._on_event("board.posted", seq=seq, handle=author, preview=content)
@@ -770,6 +789,43 @@ class Store:
         with self._lock:
             rows = self._board_entries(only_seq=seq)
             return rows[0] if rows else None
+
+    def _sign_head(self, seq: int, entry_hash: str, ts: str) -> dict[str, Any]:
+        signature = keys.sign(self._signing_key, keys.checkpoint_statement(self.instance, seq, entry_hash, ts))
+        return {"seq": seq, "entry_hash": entry_hash, "time": ts, "key_id": self.key_id, "signature": signature}
+
+    def _checkpoint_if_due(self) -> None:
+        """Record a signed checkpoint of the head if the head moved and the last one is old enough. Must
+        run inside `_tx`."""
+        head = self._db.execute("SELECT seq, entry_hash FROM board_chain ORDER BY seq DESC LIMIT 1").fetchone()
+        if head is None:
+            return
+        last = self._db.execute("SELECT seq, time FROM board_checkpoints ORDER BY seq DESC LIMIT 1").fetchone()
+        if last is not None:
+            age = time.time() - datetime.strptime(last["time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
+            if last["seq"] >= head["seq"] or age < self._checkpoint_seconds:
+                return
+        cp = self._sign_head(head["seq"], head["entry_hash"], now())
+        self._db.execute(
+            "INSERT INTO board_checkpoints (seq, entry_hash, time, key_id, signature) VALUES (?, ?, ?, ?, ?)",
+            (cp["seq"], cp["entry_hash"], cp["time"], cp["key_id"], cp["signature"]),
+        )
+
+    def signed_board_head(self) -> dict[str, Any]:
+        """The current head, signed now by the instance key; also records a checkpoint when one is due."""
+        with self._tx():
+            self._checkpoint_if_due()
+            row = self._db.execute("SELECT seq, entry_hash FROM board_chain ORDER BY seq DESC LIMIT 1").fetchone()
+        seq, entry_hash = (row["seq"], row["entry_hash"]) if row else (0, board.GENESIS_HASH)
+        return self._sign_head(seq, entry_hash, now())
+
+    def list_checkpoints(self, after: int, limit: int) -> list[dict[str, Any]]:
+        with self._tx():
+            self._checkpoint_if_due()
+            rows = self._db.execute(
+                "SELECT * FROM board_checkpoints WHERE seq > ? ORDER BY seq LIMIT ?", (after, limit)
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def board_head(self) -> dict[str, Any]:
         with self._lock:

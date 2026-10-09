@@ -125,3 +125,27 @@ def verify_chain(entries: Iterable[Mapping[str, Any]], now: str | None = None) -
         expected_seq += 1
         checked += 1
     return VerifyResult(True, checked, prev, warnings=tuple(warnings))
+
+
+def verify_checkpoints(
+    entries: Iterable[Mapping[str, Any]],
+    checkpoints: Iterable[Mapping[str, Any]],
+    instance: str,
+    public_key: str,
+) -> list[str]:
+    """Problems with signed checkpoints (docs/decisions/0022): a bad signature, or a checkpoint whose
+    entry_hash differs from the chain's entry at that seq (the chain was rewritten after it was signed).
+    `entries` as returned by GET /v1/board; an empty list means every checkpoint holds."""
+    from . import keys  # keys imports this module
+
+    hashes = {e["seq"]: e["entry_hash"] for e in entries}
+    problems = []
+    for cp in checkpoints:
+        statement = keys.checkpoint_statement(instance, cp["seq"], cp["entry_hash"], cp["time"])
+        if not keys.verify(public_key, cp["signature"], statement):
+            problems.append(f"checkpoint #{cp['seq']}: signature does not verify")
+        elif cp["seq"] not in hashes:
+            problems.append(f"checkpoint #{cp['seq']}: the chain has no such entry")
+        elif hashes[cp["seq"]] != cp["entry_hash"]:
+            problems.append(f"checkpoint #{cp['seq']}: the chain differs from what was signed")
+    return problems

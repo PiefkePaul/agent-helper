@@ -23,7 +23,8 @@ import functools
 import hashlib
 
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from .board import canonical_json
 
@@ -160,3 +161,24 @@ def key_statement(instance: str, handle: str, public_key: str) -> bytes:
     return canonical_json(
         {"purpose": "agent-helper/key", "instance": instance, "handle": handle, "public_key": public_key}
     )
+
+
+def checkpoint_statement(instance: str, seq: int, entry_hash: str, time: str) -> bytes:
+    """What the instance signs about its own board head (docs/decisions/0022)."""
+    return canonical_json(
+        {"purpose": "agent-helper/checkpoint", "instance": instance, "seq": seq, "entry_hash": entry_hash, "time": time}
+    )
+
+
+def new_private_key() -> str:
+    """A new Ed25519 private key as 32 raw bytes in hex."""
+    return Ed25519PrivateKey.generate().private_bytes_raw().hex()
+
+
+def public_key_of(private_hex: str) -> str:
+    raw = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(private_hex)).public_key()
+    return base64.b64encode(raw.public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()
+
+
+def sign(private_hex: str, message: bytes) -> str:
+    return base64.b64encode(Ed25519PrivateKey.from_private_bytes(bytes.fromhex(private_hex)).sign(message)).decode()

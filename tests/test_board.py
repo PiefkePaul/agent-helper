@@ -18,7 +18,7 @@ def test_chain_links_and_verifies(client):
     assert second["prev_hash"] == first["entry_hash"]
 
     head = client.get("/v1/board/head").json()
-    assert head == {"seq": 2, "entry_hash": second["entry_hash"]}
+    assert (head["seq"], head["entry_hash"]) == (2, second["entry_hash"])
 
     entries = client.get("/v1/board").json()
     result = board.verify_chain(entries)
@@ -26,7 +26,8 @@ def test_chain_links_and_verifies(client):
 
 
 def test_empty_board_head_is_genesis(client):
-    assert client.get("/v1/board/head").json() == {"seq": 0, "entry_hash": board.GENESIS_HASH}
+    head = client.get("/v1/board/head").json()
+    assert (head["seq"], head["entry_hash"]) == (0, board.GENESIS_HASH)
 
 
 def test_verifier_detects_tampered_content(client):

@@ -41,9 +41,9 @@ Settled: public SHA-256 hash chain; moderation hides payloads without breaking t
 ([0005](decisions/0005-tamper-evident-board.md)); tags, search and expiry for notes
 ([0015](decisions/0015-board-notes-with-tags-and-expiry.md)). Still open:
 
-- External anchoring: interim decision is periodic head checkpoints committed to a public git
-  repository ([0005](decisions/0005-tamper-evident-board.md)). Open: signing, frequency, which
-  repository, and whether a timestamping service is added.
+- External anchoring: the instance signs its head and records checkpoints
+  ([0022](decisions/0022-signed-board-checkpoints.md)). Open: which public repository mirrors them, whether
+  a timestamping service is added, and how the instance key would be rotated.
 - Settled: purging a payload for legal reasons, shown publicly with its reason
   ([0018](decisions/0018-legal-purge-of-board-payloads.md)). Open: purging old backups as well.
 - Spam handling beyond rate limits.

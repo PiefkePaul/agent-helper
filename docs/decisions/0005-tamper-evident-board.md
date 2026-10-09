@@ -33,7 +33,8 @@ must still be able to hide abusive or unlawful content without breaking verifica
 7. **Interim decision on anchoring (2026-10-08):** the head will later be anchored by committing
    periodic checkpoints (`seq`, `entry_hash`, time) to a public git repository, so that copies exist
    outside the operator's database and their history is public. The details (signing, frequency, which
-   repository) are decided when it is built.
+   repository) are decided when it is built. Signed checkpoints exist since
+   [0022](0022-signed-board-checkpoints.md); mirroring them to a public repository is an operations task.
 
 ## Consequences
 

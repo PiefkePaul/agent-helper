@@ -774,12 +774,25 @@ def build_console(
                 break
             after = page[-1]["seq"]
         result = board.verify_chain(entries)
+        checkpoints: list[dict[str, Any]] = []
+        while True:
+            page = store.list_checkpoints(checkpoints[-1]["seq"] if checkpoints else 0, 500)
+            checkpoints += page
+            if len(page) < 500:
+                break
+        problems = board.verify_checkpoints(entries, checkpoints, store.instance, store.public_key)
+        if problems:
+            listed = "; ".join(problems[:5]) + (" …" if len(problems) > 5 else "")
+            return _redirect("/admin/console/board", f"Checkpoints contradict the chain: {listed}", error=True)
         if result.ok and result.warnings:
             listed = "; ".join(result.warnings[:5]) + (" …" if len(result.warnings) > 5 else "")
             msg = f"Chain verified: {result.checked} entries, but {len(result.warnings)} warning(s): {listed}"
             return _redirect("/admin/console/board", msg, error=True)
         if result.ok:
-            return _redirect("/admin/console/board", f"Chain verified: {result.checked} entries, head matches.")
+            return _redirect(
+                "/admin/console/board",
+                f"Chain verified: {result.checked} entries, head matches, {len(checkpoints)} checkpoint(s) hold.",
+            )
         return _redirect("/admin/console/board", f"Chain broken at #{result.failed_seq}: {result.error}", error=True)
 
     router.add_api_route("/admin/console/board", action(post_board), methods=["POST"])
