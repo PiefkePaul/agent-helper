@@ -15,8 +15,8 @@ the details open.
 
 1. **The instance has its own Ed25519 key.** It is created once per database (`instance_meta`), like the
    instance id (0017). The public key and its key id are published in `/.well-known/agent-helper.json`
-   under `instance_key`, with `previous_keys` (key id to public key) for keys this database signed with
-   before. Optionally, `INSTANCE_SIGNING_KEY_FILE` names a file outside the data volume holding the key
+   under `instance_key`, with `previous_keys` for keys this database signed with before: key id to
+   `{public_key, status, since, reason}`, where `status` is `rotated` or `revoked`. Optionally, `INSTANCE_SIGNING_KEY_FILE` names a file outside the data volume holding the key
    (64 hex characters); the service refuses to start if it cannot read it. Without the variable nothing
    changes.
 2. **The head is signed.** `GET /v1/board/head` returns `seq`, `entry_hash`, `time`, `key_id` and
@@ -32,8 +32,9 @@ the details open.
    updates and deletes (database triggers), as the board payloads do.
 4. **Verification.** A checkpoint holds when its signature verifies with the published key and the
    chain's entry at its `seq` still has its `entry_hash`. A checkpoint made with one of the
-   `previous_keys` is checked with that key and shown as a note ("rotated"), not as an error; so are
-   checkpoint times that go backwards. With `INSTANCE_SIGNING_KEY_FILE` on a fresh database no database
+   `rotated` key is checked with that key and shown as a note, not as an error. A checkpoint made with a
+   `revoked` key counts neither as proof nor as counter-proof: it is ignored with a note and can never
+   produce "the chain differs". Checkpoint times that go backwards are a note as well. With `INSTANCE_SIGNING_KEY_FILE` on a fresh database no database
    key is created at all. Hiding, expiry and legal purges never change
    entry hashes (0005, 0015, 0018), so they never break a checkpoint. The reference verifier
    (`board.verify_checkpoints`) and the console's "Verify the whole chain" check every stored checkpoint.
@@ -41,6 +42,13 @@ the details open.
    checkpoints, and the operator can mirror `/v1/board/checkpoints` into a public git repository on a
    schedule (an operations task; which repository is not recorded here). A rewritten chain then
    contradicts a signed statement that exists elsewhere.
+
+6. **Key status.** Moving to `INSTANCE_SIGNING_KEY_FILE` revokes the existing database key, because it lies
+   in every backup. `maintenance new-instance-id` marks the old key `rotated`, or `revoked` with
+   `--revoke-old-key`. `maintenance revoke-key --key-id <id> --confirm <id>` revokes an earlier key later,
+   for example when a backup leaked; it takes effect at the next start. Revocation is one-way, a revoked
+   key cannot be restored with `restore-instance-id`, and the current key cannot be revoked (move to a new
+   key first).
 
 ## Consequences
 

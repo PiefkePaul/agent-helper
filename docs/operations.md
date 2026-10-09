@@ -172,7 +172,12 @@ Protect backups like that key: whoever has a copy can sign checkpoints as this i
 key out of the data volume and its backups, set `INSTANCE_SIGNING_KEY_FILE` to a file with 64 hex
 characters (for example a Docker secret; create one with
 `python -c "from agent_helper import keys; print(keys.new_private_key())"`), and back that file up
-separately. Without it, the service keeps using the key in the database. Restoring a
+separately. Without it, the service keeps using the key in the database. Switching to the key file
+marks the database key as revoked (it is in every earlier backup), so its checkpoints no longer count.
+If a backup with a key leaks later, revoke that key with the service stopped:
+`python -m agent_helper.maintenance revoke-key --key-id <id> --confirm <id>` (the key ids are listed as
+`previous_keys` in `/.well-known/agent-helper.json`). Revoking the current key is refused; move to a key
+file or a new instance id first. Restoring a
 backup keeps all of them, so signatures stay valid; a fresh database gets a new instance id, which
 makes all earlier signatures show as invalid.
 

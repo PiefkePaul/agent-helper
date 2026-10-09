@@ -366,21 +366,27 @@ class Store:
         self.instance = self._meta("instance_id", lambda: "ah-" + secrets.token_hex(16))
         self._challenge_key = bytes.fromhex(self._meta("challenge_key", lambda: secrets.token_hex(32)))
         # The instance's own signing key, for board checkpoints (docs/decisions/0022).
+        # Earlier keys with their status (docs/decisions/0022): "rotated" keys still vouch for their
+        # checkpoints, "revoked" ones vouch for nothing.
+        registry: dict[str, dict[str, str]] = json.loads(self._meta_value("previous_keys") or "{}")
         if signing_key_file:
-            # With a key file no database key is created; one that exists from before becomes a previous key.
+            # With a key file no database key is created. One that exists from before lies in every backup,
+            # so it is revoked.
             db_key = self._meta_value("signing_key")
             self._signing_key = keys.read_private_key_file(signing_key_file)
+            if db_key and db_key != self._signing_key:
+                keys.add_previous_key(registry, db_key, "revoked", now(), keys.REVOKED_BY_KEY_FILE)
         else:
-            db_key = self._signing_key = self._meta("signing_key", keys.new_private_key)
+            self._signing_key = self._meta("signing_key", keys.new_private_key)
         self.public_key = keys.public_key_of(self._signing_key)
         self.key_id = keys.key_id(self.public_key)
-        # Keys this database signed with before (the database key when a key file is used, and the key
-        # before `maintenance new-instance-id`), so verifiers can tell "rotated" from "forged".
-        self.other_keys = {}
-        for private in (db_key, self._meta_value("previous_signing_key")):
-            if private and private != self._signing_key:
-                public = keys.public_key_of(private)
-                self.other_keys[keys.key_id(public)] = public
+        registry.pop(self.key_id, None)  # the current key is never a previous one
+        self._db.execute(
+            "INSERT INTO instance_meta (name, value) VALUES ('previous_keys', ?)"
+            " ON CONFLICT (name) DO UPDATE SET value = excluded.value",
+            (json.dumps(registry, sort_keys=True),),
+        )
+        self.other_keys = registry
 
     def _meta_value(self, name: str) -> str | None:
         row = self._db.execute("SELECT value FROM instance_meta WHERE name = ?", (name,)).fetchone()

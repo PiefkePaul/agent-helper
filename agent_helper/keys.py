@@ -197,3 +197,19 @@ def public_key_of(private_hex: str) -> str:
 
 def sign(private_hex: str, message: bytes) -> str:
     return base64.b64encode(Ed25519PrivateKey.from_private_bytes(bytes.fromhex(private_hex)).sign(message)).decode()
+
+
+REVOKED_BY_KEY_FILE = "replaced by INSTANCE_SIGNING_KEY_FILE; the database key is in every backup"
+
+
+def add_previous_key(
+    registry: dict[str, dict[str, str]], private_hex: str, status: str, since: str, reason: str
+) -> str:
+    """Record an earlier signing key as "rotated" (its checkpoints still count) or "revoked" (they count
+    neither way). An existing entry is only ever moved from rotated to revoked, never back."""
+    public = public_key_of(private_hex)
+    kid = key_id(public)
+    old = registry.get(kid)
+    if old is None or (old["status"] == "rotated" and status == "revoked"):
+        registry[kid] = {"public_key": public, "status": status, "since": since, "reason": reason}
+    return kid

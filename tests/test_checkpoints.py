@@ -158,17 +158,23 @@ def test_signing_key_from_a_file(make_client, tmp_path):
     second = make_client(board_checkpoint_seconds=0, instance_signing_key_file=key_file)
     store = second.app.state.store
     assert store.public_key == keys.public_key_of(private) != db_key
-    assert store.other_keys == {keys.key_id(db_key): db_key}
+    # The database key lies in every backup, so moving to a key file revokes it.
+    db_id = keys.key_id(db_key)
+    assert list(store.other_keys) == [db_id]
+    assert store.other_keys[db_id]["status"] == "revoked" and store.other_keys[db_id]["public_key"] == db_key
     described = second.get("/.well-known/agent-helper.json").json()["instance_key"]
     assert described["public_key"] == store.public_key and described["previous_keys"] == store.other_keys
     _post(second, "signed with the file key")
     cps = second.get("/v1/board/checkpoints").json()["checkpoints"]
     args = (_all_entries(second), cps, store.instance, store.public_key, store.other_keys)
-    assert board.verify_checkpoints(*args) == []  # a rotated key is not an error...
-    assert board.checkpoint_notes(*args) == [f"checkpoint #1: made with another key ({keys.key_id(db_key)}, rotated)"]
-    # ...but a checkpoint claiming the rotated key with a forged signature is.
-    forged = [dict(cps[0], signature=keys.sign(keys.new_private_key(), b"x"))]
-    assert board.verify_checkpoints(args[0], forged, *args[2:]) == ["checkpoint #1: signature does not verify"]
+    assert board.verify_checkpoints(*args) == []
+    assert board.checkpoint_notes(*args) == [f"checkpoint #1: signed with a revoked key ({db_id}), ignored"]
+    # A checkpoint with the revoked key never counts against the chain, whatever it says...
+    lying = [dict(cps[0], entry_hash="0" * 64)]
+    assert board.verify_checkpoints(args[0], lying, *args[2:]) == []
+    # ...while one claiming the current key must verify.
+    forged = [dict(cps[1], signature=keys.sign(keys.new_private_key(), b"x"))]
+    assert board.verify_checkpoints(args[0], forged, *args[2:]) == ["checkpoint #2: signature does not verify"]
 
 
 def test_an_unreadable_key_file_stops_the_start(make_client, tmp_path):
@@ -207,3 +213,26 @@ def test_a_checkpoint_far_in_the_future_does_not_block_new_ones(make_client, mon
     args = (_all_entries(client), cps, store.instance, store.public_key, store.other_keys)
     assert board.verify_checkpoints(*args) == []
     assert board.checkpoint_notes(*args) == ["checkpoint #2: its time is earlier than the one before (a clock error)"]
+
+
+def test_rotated_keys_still_count(make_client):
+    client = make_client(board_checkpoint_seconds=0)
+    _post(client, "x")
+    store = client.app.state.store
+    old = keys.new_private_key()
+    registry = {}
+    kid = keys.add_previous_key(registry, old, "rotated", "2026-10-01T00:00:00Z", "test")
+    statement = keys.checkpoint_statement(
+        store.instance, 1, _all_entries(client)[0]["entry_hash"], "2026-10-01T00:00:00Z"
+    )
+    cp = {"seq": 1, "entry_hash": _all_entries(client)[0]["entry_hash"], "time": "2026-10-01T00:00:00Z"}
+    cp |= {"key_id": kid, "signature": keys.sign(old, statement)}
+    args = (_all_entries(client), [cp], store.instance, store.public_key, registry)
+    assert board.verify_checkpoints(*args) == []
+    assert board.checkpoint_notes(*args) == [f"checkpoint #1: made with another key ({kid}, rotated)"]
+    # A rotated key does vouch: a checkpoint made with it that disagrees with the chain is an error.
+    assert board.verify_checkpoints(args[0], [dict(cp, entry_hash="0" * 64)], *args[2:]) != []
+    # Revocation is one-way.
+    keys.add_previous_key(registry, old, "revoked", "2026-10-02T00:00:00Z", "test")
+    keys.add_previous_key(registry, old, "rotated", "2026-10-03T00:00:00Z", "test")
+    assert registry[kid]["status"] == "revoked"
