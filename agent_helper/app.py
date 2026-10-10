@@ -71,6 +71,7 @@ from .store import (
     SignatureRejected,
     Store,
 )
+from .usage import V1_SEGMENT as V1_ROUTE_SEGMENT
 from .usage import Usage
 
 USAGE_FLUSH_SECONDS = 300
@@ -878,4 +879,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(admin)
     app.include_router(build_console(settings, store, catalog, lambda: app.state.notifier, mail_limits, flush_usage))
+    usage.v1_segments = frozenset(
+        m.group(1) for route in v1.routes if (m := V1_ROUTE_SEGMENT.match(getattr(route, "path", "")))
+    )
     return app

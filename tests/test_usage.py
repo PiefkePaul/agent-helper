@@ -2,7 +2,7 @@ import pytest
 from conftest import ADMIN_SECRET
 from test_mcp import legacy, modern
 
-from agent_helper.usage import MAX_CLIENT_NAMES_PER_FLUSH, Usage, client_family, endpoint_of, normalize_client_name
+from agent_helper.usage import KNOWN_MCP_CLIENTS, Usage, client_family, endpoint_of, normalize_client_name
 
 
 def counts(client, admin_headers, days=1) -> dict[tuple[str, str], int]:
@@ -53,28 +53,48 @@ def test_endpoint_of():
     assert endpoint_of(scope("/llms.txt"), 200) == "llms.txt"
     assert endpoint_of(scope("/mcp", "POST"), 200) == "mcp:post"
     assert endpoint_of(scope("/a2a", "POST"), 400) == "a2a:post"
-    assert endpoint_of(scope("/v1/requests/abc", "POST"), 201) == "v1:requests:post"
-    assert endpoint_of(scope("/v1/requests/abc", "POST"), 404) == "v1:requests:post"  # only GET/HEAD 404s are probes
+    known = frozenset({"requests"})
+    assert endpoint_of(scope("/v1/requests/abc", "POST"), 201, known) == "v1:requests:post"
+    # Only GET/HEAD 404s are probes.
+    assert endpoint_of(scope("/v1/requests/abc", "POST"), 404, known) == "v1:requests:post"
+    assert endpoint_of(scope("/v1/zz0", "POST"), 404, known) == "v1:other"
+    assert endpoint_of(scope("/v1/requests", "FROBNICATE"), 405, known) == "v1:requests:other"
+    assert endpoint_of(scope("/v1/Weird!", "GET"), 200, known) == "v1:other"
+    assert endpoint_of(scope("/mcp", "FROBNICATE"), 405) == "mcp:other"
     assert endpoint_of(scope("/whatever", "POST"), 405) == "other"
 
 
-def test_client_names_are_cut_down():
-    assert normalize_client_name("  Claude Desktop <script> ") == "claude-desktop-script"
-    assert normalize_client_name("x" * 100) == "x" * 32
+def test_only_known_client_names_are_kept():
+    assert normalize_client_name("Claude Desktop") == "claude-desktop"
+    assert normalize_client_name("claude-code/2.1") == "claude-code"
+    assert normalize_client_name("Cursor") == "cursor"
+    assert normalize_client_name("my-agent-handle-1234") == "other"
+    assert normalize_client_name("cursorish") == "other"
     assert normalize_client_name("---") is None
     assert normalize_client_name(42) is None
     assert normalize_client_name(None) is None
 
 
-def test_self_reported_client_names_are_capped():
+def test_client_names_stay_bounded():
     usage = Usage()
-    for i in range(MAX_CLIENT_NAMES_PER_FLUSH + 20):
+    for i in range(500):
         usage.record_client_name("mcp", f"client-{i}")
+    usage.record_client_name("mcp", "Claude Desktop")
     rows = usage.take()
     names = {family for _, metric, family, _ in rows if metric == "mcp:client"}
-    assert len(names) == MAX_CLIENT_NAMES_PER_FLUSH + 1 and "other" in names
-    assert sum(n for *_, n in rows) == MAX_CLIENT_NAMES_PER_FLUSH + 20
+    assert names == {"other", "claude-desktop"}
+    assert all(normalize_client_name(k) == k for k in KNOWN_MCP_CLIENTS)
     assert usage.take() == []
+
+
+def test_callers_cannot_invent_metrics(client, admin_headers):
+    for i in range(30):
+        client.post(f"/v1/zz{i}", json={})
+    client.request("FROBNICATE", "/v1/board")
+    client.request("FROBNICATE", "/mcp")
+    metrics = {metric for metric, _ in counts(client, admin_headers)}
+    assert not any("zz" in m or "frobnicate" in m for m in metrics)
+    assert "v1:other" in metrics
 
 
 def test_disabled_usage_counts_nothing():
@@ -123,8 +143,7 @@ def test_mcp_client_names_and_tools_are_counted(client, admin_headers):
     modern(client, "tools/call", {"name": "describe_need", "arguments": {}})
     modern(client, "tools/call", {"name": "no_such_tool", "arguments": {}})
     c = counts(client, admin_headers)
-    assert c[("mcp:client", "test")] == 1
-    assert c[("mcp:client", "some-client")] == 1
+    assert c[("mcp:client", "other")] == 2  # "test" and "Some Client" are not known client names
     assert c[("mcp:tool:describe_need", "")] == 1
     assert not any(metric == "mcp:tool:no_such_tool" for metric, _ in c)
 
@@ -158,11 +177,11 @@ def test_console_usage_page(make_client):
     legacy(
         client,
         "initialize",
-        {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "Odd Name", "version": "1"}},
+        {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "Cursor", "version": "1"}},
     )
     page = client.get("/admin/console/usage?days=7")
     assert page.status_code == 200
-    assert "llms.txt" in page.text and "ai_crawler" in page.text and "odd-name" in page.text
+    assert "llms.txt" in page.text and "ai_crawler" in page.text and "cursor" in page.text
 
 
 # --- IndexNow ---------------------------------------------------------------------------------------

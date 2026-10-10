@@ -18,15 +18,18 @@ proves ownership with a key file at its root.
    request: an endpoint group (`llms.txt`, `mcp:post`, `v1:requests:post`, `landing:html`), an MCP tool
    (`mcp:tool:<name>`, only for tools this service has), an A2A method, a refused A2A version, or a probe
    for a well-known file this service does not have (`probe:ai-plugin.json`; any other 404 is
-   `not_found`). Operator pages and `/healthz` are not counted.
+   `not_found`). Every part of a metric comes from a fixed set: a path segment under `/v1/` only when the
+   service has a route there (else `v1:other`), an HTTP method only when it is an ordinary one (else
+   `other`). Callers cannot invent metrics. Operator pages and `/healthz` are not counted.
 2. **Clients are reduced to a family.** The User-Agent header is classified into one of `ai_agent`,
    `ai_crawler`, `search_crawler`, `monitor`, `http_library`, `browser`, `other_bot` or `none`, and then
    dropped. No address, no full User-Agent, no time of day, no request content and nothing that links two
    requests is stored.
-3. **Self-reported MCP client names** (`clientInfo.name`) are counted as `mcp:client`, lowercased, reduced
-   to `a-z 0-9 . _ -` and cut to 32 characters. Per flush at most 50 distinct names are kept; the rest
-   count as `other`, so random names cannot grow the table. The console shows them escaped and marked as
-   agent-supplied.
+3. **Self-reported MCP client names** (`clientInfo.name`) are counted as `mcp:client` only when they start
+   with a known client name (a fixed list in `usage.py`, such as `claude-desktop` or `cursor`), and then
+   only as that name; everything else counts as `other`. A free-form name could carry an agent's own handle
+   and leave a trace of it per day, and random names would grow the table. The list is extended by pull
+   request when an `other` count suggests a common client is missing.
 4. **Counts are held in memory and added to the database every 5 minutes** and at shutdown. Rows older
    than `USAGE_RETENTION_DAYS` (default 400) are deleted. `USAGE_STATS=false` turns counting off.
    The operator reads them at `GET /admin/v1/usage?days=N` and on the console page "Usage".

@@ -77,8 +77,21 @@ NAMED = {
     "/.well-known/mcp/server-card.json": "well-known:mcp-server-card",
 }
 V1_SEGMENT = re.compile(r"^/v1/([a-z][a-z0-9-]{0,31})(?:/|$)")
-CLIENT_NAME = re.compile(r"[^a-z0-9._-]+")
-MAX_CLIENT_NAMES_PER_FLUSH = 50
+# Methods are counted by name only when they are ordinary HTTP methods, so a caller cannot invent metrics.
+METHODS = frozenset({"get", "head", "post", "put", "patch", "delete", "options"})
+
+# Self-reported MCP client names are kept only when they start with one of these known client names, and
+# then only as that name; anything else counts as "other". A free-form name could carry an agent's own
+# handle and give it a trace per day, and random names would grow the table.
+KNOWN_MCP_CLIENTS = (
+    "claude-ai", "claude-code", "claude-desktop", "claude", "chatgpt", "openai", "codex", "cursor", "vscode",
+    "visual-studio-code", "github-copilot", "copilot", "windsurf", "cline", "roo-code", "continue", "zed",
+    "jetbrains", "goose", "gemini-cli", "gemini", "amazon-q", "kiro", "warp", "raycast", "librechat",
+    "open-webui", "langchain", "langgraph", "llamaindex", "fast-agent", "mcp-inspector", "inspector",
+    "mcp-remote", "mcp-use", "smithery", "glama", "pulsemcp", "mistral", "le-chat", "perplexity",
+    "postman", "opencode", "crush", "amp", "witsy", "5ire", "cherry-studio", "lm-studio", "msty",
+)  # fmt: skip
+CLIENT_NAME = re.compile(r"[^a-z0-9]+")
 
 
 def client_family(user_agent: str) -> str:
@@ -109,31 +122,43 @@ def _header(scope: Scope, name: bytes) -> str:
     return ""
 
 
-def endpoint_of(scope: Scope, status: int) -> str | None:
-    """What a request is counted as, or None when it is not counted (operator pages, health checks)."""
-    path, method = scope["path"], scope["method"]
+def endpoint_of(scope: Scope, status: int, v1_segments: frozenset[str] = frozenset()) -> str | None:
+    """What a request is counted as, or None when it is not counted (operator pages, health checks).
+
+    Every part of the result comes from a fixed set: path segments under /v1/ only when the service has a
+    route there (``v1_segments``), methods only when they are ordinary HTTP methods."""
+    path = scope["path"]
+    method = scope["method"].lower()
+    method = method if method in METHODS else "other"
     if path == "/admin" or path.startswith("/admin/") or path == "/healthz":
         return None
-    if status == 404 and method in ("GET", "HEAD"):
+    if status == 404 and method in ("get", "head"):
         return PROBES.get(path, "not_found")
     if path == "/":
         return "landing:html" if "text/html" in _header(scope, b"accept") else "landing:text"
     if path in NAMED:
         return NAMED[path]
     if path in ("/mcp", "/a2a"):
-        return f"{path[1:]}:{method.lower()}"
+        return f"{path[1:]}:{method}"
     match = V1_SEGMENT.match(path)
     if match:
-        return f"v1:{match.group(1)}:{method.lower()}"
+        return f"v1:{match.group(1)}:{method}" if match.group(1) in v1_segments else "v1:other"
+    if path.startswith("/v1/"):
+        return "v1:other"
     return PROBES.get(path, "other")
 
 
 def normalize_client_name(name: object) -> str | None:
-    """A self-reported client name (MCP clientInfo.name) cut down to a short, harmless label."""
+    """A self-reported client name (MCP clientInfo.name) reduced to a known client name, or "other"."""
     if not isinstance(name, str):
         return None
-    label = CLIENT_NAME.sub("-", name.strip().lower())[:32].strip("-.")
-    return label or None
+    label = CLIENT_NAME.sub("-", name.strip().lower()[:200]).strip("-")
+    if not label:
+        return None
+    for known in KNOWN_MCP_CLIENTS:
+        if label == known or label.startswith(known + "-"):
+            return known
+    return "other"
 
 
 class Usage:
@@ -143,6 +168,8 @@ class Usage:
         self.enabled = enabled
         self._lock = threading.Lock()
         self._counts: Counter[tuple[str, str, str]] = Counter()
+        # Path segments under /v1/ that the service has routes for; set once the app is built.
+        self.v1_segments: frozenset[str] = frozenset()
 
     @staticmethod
     def _day() -> str:
@@ -157,7 +184,7 @@ class Usage:
     def record_http(self, scope: Scope, status: int) -> None:
         if not self.enabled or scope.get("type") != "http":
             return
-        endpoint = endpoint_of(scope, status)
+        endpoint = endpoint_of(scope, status, self.v1_segments)
         if endpoint is not None:
             self.count(endpoint, client_family(_header(scope, b"user-agent")))
 
@@ -168,19 +195,10 @@ class Usage:
             self.count(f"{protocol}:client", label)
 
     def take(self) -> list[tuple[str, str, str, int]]:
-        """Remove and return the counts gathered so far. Self-reported client names beyond a fixed number per
-        flush are folded into "other", so a client sending random names cannot grow the table."""
+        """Remove and return the counts gathered so far."""
         with self._lock:
             counts, self._counts = self._counts, Counter()
-        rows: list[tuple[str, str, str, int]] = []
-        names_seen: set[str] = set()
-        for (day, metric, family), n in sorted(counts.items(), key=lambda kv: -kv[1]):
-            if metric.endswith(":client"):
-                if family not in names_seen and len(names_seen) >= MAX_CLIENT_NAMES_PER_FLUSH:
-                    family = "other"
-                names_seen.add(family)
-            rows.append((day, metric, family, n))
-        return rows
+        return [(day, metric, family, n) for (day, metric, family), n in counts.items()]
 
     def flush(self, write: Callable[[list[tuple[str, str, str, int]]], None]) -> None:
         rows = self.take()

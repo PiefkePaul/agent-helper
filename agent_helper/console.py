@@ -843,19 +843,16 @@ def build_console(
             note = ""
         links = " · ".join(f'<a href="/admin/console/usage?days={d}">{d} d</a>' for d in (1, 7, 30, 90))
 
-        def family_cell(metric: str, family: str) -> str:
-            # MCP client names are reported by the clients themselves.
-            return agent_word(family) if metric.endswith(":client") else e(family or "-")
-
         table = "".join(
-            f"<tr><td>{e(r['metric'])}</td><td>{family_cell(r['metric'], r['family'])}</td>"
+            f"<tr><td>{e(r['metric'])}</td><td>{e(r['family'] or '-')}</td>"
             f"<td>{r['count']}</td><td>{r['days']}</td><td>{e(r['last_day'])}</td></tr>"
             for r in rows
         )
         body = (
             f"{note}<p class='note'>Daily totals only: no addresses, no user agents, no times of day "
             "(decision 0023). Client families come from the User-Agent header, MCP client names from the "
-            "clients themselves; both are easy to fake. Monitoring and the console are not counted.</p>"
+            'clients themselves (only known names, others as "other"); both are easy to fake. '
+            "Monitoring and the console are not counted.</p>"
             f"<p>Period: {links} (now {days} d)</p>"
             "<table><tr><th>What</th><th>Client</th><th>Count</th><th>Days seen</th><th>Last day</th></tr>"
             f"{table or '<tr><td colspan=5>Nothing counted yet.</td></tr>'}</table>"
