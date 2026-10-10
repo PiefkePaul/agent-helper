@@ -31,7 +31,7 @@ SEARCH_CRAWLERS = (
     "googlebot", "bingbot", "duckduckbot", "yandexbot", "baiduspider", "applebot", "seznambot", "petalbot",
     "qwantbot", "mojeekbot", "yeti/",
 )  # fmt: skip
-MONITORS = ("uptime", "monitor", "pingdom", "statuscake", "healthcheck", "n8n")
+MONITORS = ("uptime", "monitor", "pingdom", "statuscake", "healthcheck")
 HTTP_LIBRARIES = (
     "python-requests", "python-httpx", "python-urllib", "aiohttp", "httpx", "axios", "node-fetch", "undici",
     "node", "curl/", "wget/", "go-http-client", "okhttp", "java/", "libwww", "httpie", "postmanruntime",
