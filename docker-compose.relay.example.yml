@@ -9,12 +9,15 @@ services:
     env_file:
       - relay.env          # derived from config/relay.env.example, kept outside the repository
     ports:
+      # Host port and container port are free to choose (not necessarily 443); keep them in line with
+      # RELAY_LISTEN_PORT, the firewall rule and the port in the service's RELAY_URL.
       - "8090:8090"        # or keep it on loopback behind a TLS-terminating proxy
       # With RELAY_ALLOWED_CLIENTS the relay must see the real peer: Docker's NAT keeps it, the userland proxy
       # and reverse proxies do not (see docs/operations.md, "Push notices to agents").
     # dns:                 # a public resolver of your choice, never one with an internal view
     #   - <resolver address>
     healthcheck:           # the image's default check is for the service, not the relay
+      # Use the same port as RELAY_LISTEN_PORT.
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8090), 2)"]
       interval: 30s
       timeout: 3s

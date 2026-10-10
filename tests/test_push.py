@@ -1107,3 +1107,15 @@ def test_one_failing_name_does_not_take_the_others_down():
     flt.refresh_if_stale()
     assert flt.allows("93.184.215.14")  # a still resolves
     assert not flt.allows("93.184.215.20")  # b failed for longer than max_stale
+
+
+def test_the_relay_port_is_free_to_choose(monkeypatch):
+    from agent_helper.config import Settings
+    from agent_helper.push import HttpsRelay
+
+    monkeypatch.setenv("RELAY_URL", "https://relay.example.invalid:8443/")
+    url = Settings.from_env().relay_url
+    assert url == "https://relay.example.invalid:8443"
+    relay = HttpsRelay(url, RELAY_SECRET)
+    assert (relay.host, relay.port) == ("relay.example.invalid", 8443)
+    assert HttpsRelay("https://relay.example.invalid", RELAY_SECRET).port == 443
