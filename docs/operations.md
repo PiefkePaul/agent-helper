@@ -123,9 +123,13 @@ parts:
    into the operator's network: `python -m agent_helper.relay` from the same image, configured from
    `config/relay.env.example` (example compose file: `docker-compose.relay.example.yml`). It must be
    reachable over HTTPS, ideally only from the service's address (firewall on the relay's server). It keeps
-   no database; its volume holds only the opt-out list.
-2. **The service**: `PUSH_MODE=public` (or `allowlist`), `RELAY_URL`, and the same `RELAY_SECRET` as the
-   relay. Put the operator's own domains into `PUSH_DENY_DOMAINS` on both sides and the operator's
+   no database; its volume holds only the opt-out list. The relay's port is freely chosen: it does not have
+   to be 443. Some networks block or intercept 443 on the way, so any free port works, as long as the
+   container's `RELAY_LISTEN_PORT`, the published port, the firewall rule and the port in `RELAY_URL`
+   agree. (This is the port the service calls; the destinations of push notices stay limited by
+   `PUSH_ALLOWED_PORTS`.)
+2. **The service**: `PUSH_MODE=public` (or `allowlist`), `RELAY_URL` (with the relay's port if it is not
+   443, as in `https://<relay-host>:<port>`), and the same `RELAY_SECRET` as the relay. Put the operator's own domains into `PUSH_DENY_DOMAINS` on both sides and the operator's
    networks into `PUSH_DENY_NETS` on the relay. The service only connects out to the relay; it needs no
    inbound port for push.
 
