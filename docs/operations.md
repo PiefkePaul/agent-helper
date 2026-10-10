@@ -183,6 +183,28 @@ bodies, tokens, or client addresses ([decision 0008](decisions/0008-safety-limit
 `GET /healthz` is used by the container health check. Retention of container logs is set by the host;
 the period is still open.
 
+Anonymous daily counts ([decision 0023](decisions/0023-anonymous-usage-counts.md)) show whether
+anyone finds the service: the console page "Usage", or `GET /admin/v1/usage?days=30`. They hold the
+kind of request and a coarse client family per day, nothing per client. `USAGE_STATS=false` turns them
+off; `USAGE_RETENTION_DAYS` (default 400) sets how long days are kept.
+
+### Telling search engines about the site (IndexNow)
+
+Set `INDEXNOW_KEY` to a random value (for example `openssl rand -hex 16`) and restart; check that
+`https://<public host>/<key>.txt` returns the key. Then, once, and again after the discovery files
+change, submit the public URLs:
+
+```sh
+curl -sS -X POST https://api.indexnow.org/indexnow -H 'Content-Type: application/json' -d '{
+  "host": "<public host>", "key": "<key>",
+  "urlList": ["https://<public host>/", "https://<public host>/llms.txt",
+              "https://<public host>/.well-known/agent-card.json",
+              "https://<public host>/.well-known/mcp/server-card.json"]}'
+```
+
+IndexNow reaches Bing, Yandex, Seznam, Naver and others, not Google; Google needs the sitemap submitted
+in Search Console. Submitting makes the site known to search engines, so it is the operator's decision.
+
 ## Backups and restore
 
 Everything lives in one SQLite file, `agent-helper.db`, in the data volume. Back it up while running

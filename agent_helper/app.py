@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hmac
 import logging
 from collections.abc import AsyncIterator
@@ -69,7 +71,9 @@ from .store import (
     SignatureRejected,
     Store,
 )
+from .usage import Usage
 
+USAGE_FLUSH_SECONDS = 300
 NOT_FOUND = "not found or wrong token"
 HIDDEN_PROFILE_NOTE = (
     "Saved, but the operator has hidden this profile, so it is not listed or shown. "
@@ -114,10 +118,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     mail_limits = MailLimits(settings.max_mailbox_messages, settings.mail_retention_days)
     push = PushManager(settings, store, mail_limits)
 
+    usage = Usage(enabled=settings.usage_stats)
+
+    def flush_usage() -> None:
+        try:
+            usage.flush(lambda rows: store.add_usage(rows, settings.usage_retention_days))
+        except Exception:  # counting must never take the service down
+            logging.getLogger("agent_helper").exception("could not store usage counts")
+
+    async def flush_usage_periodically() -> None:
+        while True:
+            await asyncio.sleep(USAGE_FLUSH_SECONDS)
+            await asyncio.to_thread(flush_usage)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         app.state.push.start()
+        flusher = asyncio.create_task(flush_usage_periodically())
         yield
+        flusher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await flusher
+        flush_usage()
         app.state.push.close()
         app.state.notifier.close()
         store.close()
@@ -133,6 +155,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.notifier = notifier
     app.state.store = store
     app.state.push = push
+    app.state.usage = usage
     write_limiter = TokenBucket(settings.write_per_minute)
     global_write_limiter = TokenBucket(settings.global_write_per_minute)
     app.add_middleware(
@@ -146,11 +169,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         admin_networks=parse_networks(settings.admin_allowed_nets),
         trusted_proxies=parse_networks(settings.trusted_proxies) or (),
         admin_port=settings.admin_port,
+        usage=usage,
     )
     catalog = Catalog(load_file_entries(settings), store, [PUSH_CAPABILITY] if settings.push_enabled else None)
     help_desk = helpdesk.Helpdesk(catalog, store, settings.public_base_url, settings.help_board_window)
-    mcp = McpEndpoint(settings, store, catalog, write_limiter, global_write_limiter, help_desk)
-    a2a = A2AEndpoint(settings, store, write_limiter, global_write_limiter)
+    mcp = McpEndpoint(settings, store, catalog, write_limiter, global_write_limiter, help_desk, usage)
+    a2a = A2AEndpoint(settings, store, write_limiter, global_write_limiter, usage)
 
     @app.exception_handler(HandleUnavailable)
     async def handle_unavailable(_: Request, exc: HandleUnavailable) -> JSONResponse:
@@ -196,6 +220,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/llms.txt", include_in_schema=False)
     def llms() -> PlainTextResponse:
         return PlainTextResponse(discovery.llms_txt(settings, store.instance), headers=link_header)
+
+    if settings.indexnow_key:
+        # IndexNow ownership proof (docs/decisions/0023): the key file sits at the root under its own name.
+        indexnow_key = settings.indexnow_key
+
+        @app.get(f"/{indexnow_key}.txt", response_class=PlainTextResponse, include_in_schema=False)
+        def indexnow_key_file() -> str:
+            return indexnow_key
 
     @app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
     def robots() -> str:
@@ -834,11 +866,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "no such subscription")
         return Response(status_code=204)
 
+    @admin.get("/usage")
+    def admin_usage(days: Annotated[int, Query(ge=1, le=400)] = 30) -> dict[str, Any]:
+        flush_usage()
+        return {"days": days, "rows": store.usage(days)}
+
     @admin.post("/notifications/test")
     def admin_test_notification() -> dict[str, Any]:
         result = app.state.notifier.send_test()
         return {"delivered": result.ok, "status": result.status, "error": result.error}
 
     app.include_router(admin)
-    app.include_router(build_console(settings, store, catalog, lambda: app.state.notifier, mail_limits))
+    app.include_router(build_console(settings, store, catalog, lambda: app.state.notifier, mail_limits, flush_usage))
     return app

@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -242,6 +242,15 @@ BEGIN SELECT RAISE(ABORT, 'revocation records cannot be deleted'); END;
 
 CREATE TRIGGER IF NOT EXISTS board_payloads_no_update BEFORE UPDATE ON board_payloads
 BEGIN SELECT RAISE(ABORT, 'board payloads cannot be changed'); END;
+
+-- Anonymous daily totals (docs/decisions/0023): no addresses, no user agents, no times of day.
+CREATE TABLE IF NOT EXISTS usage_daily (
+    day TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    family TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    PRIMARY KEY (day, metric, family)
+);
 """
 
 
@@ -1091,6 +1100,30 @@ class Store:
             # undo the moderation.
             self._db.execute("DELETE FROM profiles WHERE skeleton = ? AND hidden_reason IS NULL", (reg["skeleton"],))
             return True
+
+    # --- anonymous usage counts (docs/decisions/0023) --------------------------------------------
+
+    def add_usage(self, rows: list[tuple[str, str, str, int]], retention_days: int = 400) -> None:
+        cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).strftime("%Y-%m-%d")
+        with self._tx():
+            self._db.executemany(
+                "INSERT INTO usage_daily (day, metric, family, count) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT (day, metric, family) DO UPDATE SET count = count + excluded.count",
+                rows,
+            )
+            self._db.execute("DELETE FROM usage_daily WHERE day < ?", (cutoff,))
+
+    def usage(self, days: int) -> list[dict[str, Any]]:
+        """Totals per metric and client family over the last `days` days (today included), largest first."""
+        since = (datetime.now(UTC) - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT metric, family, SUM(count) AS count, COUNT(DISTINCT day) AS days, MIN(day) AS first_day,"
+                " MAX(day) AS last_day FROM usage_daily WHERE day >= ? GROUP BY metric, family"
+                " ORDER BY count DESC, metric, family",
+                (since,),
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def list_profiles_admin(self, limit: int) -> list[dict[str, Any]]:
         with self._lock:

@@ -24,6 +24,7 @@ from .config import Settings
 from .limits import GLOBAL_KEY, TokenBucket, client_key
 from .models import LIMITS, MessageIn, RequestIn
 from .store import ConversationFull, HandleUnavailable, Store
+from .usage import Usage
 
 PROTOCOL_VERSION = "1.0"
 
@@ -193,9 +194,15 @@ class RateLimited(Exception):
 
 class A2AEndpoint:
     def __init__(
-        self, settings: Settings, store: Store, write_limiter: TokenBucket, global_write_limiter: TokenBucket
+        self,
+        settings: Settings,
+        store: Store,
+        write_limiter: TokenBucket,
+        global_write_limiter: TokenBucket,
+        usage: Usage | None = None,
     ) -> None:
         self.settings = settings
+        self.usage = usage or Usage(enabled=False)
         self.store = store
         self.write_limiter = write_limiter
         self.global_write_limiter = global_write_limiter
@@ -223,12 +230,15 @@ class A2AEndpoint:
         version = (request.headers.get("a2a-version") or request.query_params.get("A2A-Version") or "").strip()
         if version != PROTOCOL_VERSION:
             shown = version[:20] or "missing (means 0.3)"
+            self.usage.count("a2a:version-refused:" + ("0.3" if not version else "other"))
             return _error(msg_id, VERSION_NOT_SUPPORTED, f"A2A version {shown} is not supported; send A2A-Version: 1.0")
         params = msg.get("params", {})
         if not isinstance(params, dict):
             return _error(msg_id, INVALID_PARAMS, "params must be an object")
         method = msg["method"]
         token = _bearer(request)
+        known = method in ("SendMessage", "GetTask", "CancelTask") or method in PUSH_METHODS or method in UNSUPPORTED
+        self.usage.count(f"a2a:method:{method if known else 'unknown'}")
         try:
             if method == "SendMessage":
                 result = await run_in_threadpool(self._send_message, request, params, token)

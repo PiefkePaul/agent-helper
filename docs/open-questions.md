@@ -12,6 +12,8 @@ Settled: `/` (plain text, HTML for browsers), `/llms.txt`, `/.well-known/agent-h
 ([0011](decisions/0011-discovery-channels.md)). Still open:
 
 - Actual listings (MCP Registry, search engine consoles, directories); these need the operator's accounts.
+  Whether discovery works is measured with anonymous daily counts
+  ([0023](decisions/0023-anonymous-usage-counts.md)).
 - MCP Server Cards once SEP-2127 is part of a released MCP revision; DNS hints.
 - Whether the well-known name should follow an emerging standard once one is widely adopted.
 

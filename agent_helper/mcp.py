@@ -56,6 +56,7 @@ from .store import (
     SignatureRejected,
     Store,
 )
+from .usage import Usage
 
 MODERN_VERSIONS = ("2026-07-28",)
 LEGACY_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
@@ -63,6 +64,7 @@ SUPPORTED_VERSIONS = MODERN_VERSIONS + LEGACY_VERSIONS
 
 META_VERSION = "io.modelcontextprotocol/protocolVersion"
 META_SERVER_INFO = "io.modelcontextprotocol/serverInfo"
+META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo"
 
 PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
@@ -775,8 +777,10 @@ class McpEndpoint:
         write_limiter: TokenBucket,
         global_write_limiter: TokenBucket,
         help_desk: helpdesk.Helpdesk | None = None,
+        usage: Usage | None = None,
     ) -> None:
         self.settings = settings
+        self.usage = usage or Usage(enabled=False)
         self.tools = build_tools(settings, store, catalog, help_desk)
         self.instructions = f'{INSTRUCTIONS} Signed statements name this instance as "{store.instance}".'
         self.write_limiter = write_limiter
@@ -836,6 +840,8 @@ class McpEndpoint:
         header_version = request.headers.get("mcp-protocol-version")
 
         if method == "initialize":
+            client_info = params.get("clientInfo")
+            self.usage.record_client_name("mcp", client_info.get("name") if isinstance(client_info, dict) else None)
             requested = params.get("protocolVersion")
             version = requested if requested in LEGACY_VERSIONS else LEGACY_VERSIONS[0]
             return _result(
@@ -862,6 +868,10 @@ class McpEndpoint:
             data = {"supported": list(SUPPORTED_VERSIONS), "requested": header_version}
             return _error(msg_id, UNSUPPORTED_PROTOCOL_VERSION, "Unsupported protocol version", 400, data)
 
+        if modern and method in ("server/discover", "tools/list"):
+            # Modern clients have no initialize; their first calls are one of these two.
+            client_info = meta.get(META_CLIENT_INFO)  # type: ignore[union-attr]
+            self.usage.record_client_name("mcp", client_info.get("name") if isinstance(client_info, dict) else None)
         if method == "server/discover":
             return _result(
                 msg_id,
@@ -900,6 +910,7 @@ class McpEndpoint:
         tool = self.tools.get(name) if isinstance(name, str) else None
         if tool is None:
             return _error(msg_id, INVALID_PARAMS, f"Unknown tool: {params.get('name')!r}", 200)
+        self.usage.count(f"mcp:tool:{tool.name}")
         arguments = params.get("arguments", {})
         if not isinstance(arguments, dict):
             return _error(msg_id, INVALID_PARAMS, "arguments must be an object", 200)
