@@ -13,6 +13,8 @@ from typing import Any
 from starlette.exceptions import HTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from .usage import Usage
+
 log = logging.getLogger("agent_helper.access")
 
 SECURITY_HEADERS = [
@@ -171,7 +173,9 @@ class GuardMiddleware:
         admin_networks: Networks | None = None,
         trusted_proxies: Networks = (),
         admin_port: int | None = None,
+        usage: Usage | None = None,
     ) -> None:
+        self.usage = usage
         self.admin_networks = admin_networks
         self.trusted_proxies = trusted_proxies
         self.admin_port = admin_port
@@ -207,6 +211,8 @@ class GuardMiddleware:
         def done() -> None:
             ms = (time.monotonic() - started) * 1000
             log.info("%s %s %s %.0fms", method, _loggable(scope["path"]), status_holder["status"], ms)
+            if self.usage is not None:
+                self.usage.record_http(scope, status_holder["status"])
 
         path = scope["path"]
         if self._admin_refused(scope, path == "/admin" or path.startswith("/admin/")):

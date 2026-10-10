@@ -162,6 +162,16 @@ def _tristate(name: str) -> bool | None:
     return None if raw == "auto" else raw in {"1", "true", "yes", "on"}
 
 
+def _indexnow_key(raw: str | None) -> str | None:
+    """The IndexNow key is public (it is served as a file); the protocol allows 8 to 128 of a-z, A-Z, 0-9, -."""
+    if not raw:
+        return None
+    key = raw.strip()
+    if not re.fullmatch(r"[A-Za-z0-9-]{8,128}", key):
+        raise SystemExit("INDEXNOW_KEY must be 8 to 128 characters of a-z, A-Z, 0-9 and '-'")
+    return key
+
+
 def _bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -204,6 +214,9 @@ class Settings:
     relay_url: str | None = None
     relay_secret: str | None = None
     relay_ca_file: Path | None = None
+    usage_stats: bool = True
+    indexnow_key: str | None = None
+    usage_retention_days: int = 400
 
     @property
     def db_path(self) -> Path:
@@ -255,6 +268,9 @@ class Settings:
             if os.environ.get("INSTANCE_SIGNING_KEY_FILE")
             else None,
             help_board_window=_int("HELP_BOARD_WINDOW", cls.help_board_window),
+            usage_stats=_bool("USAGE_STATS", cls.usage_stats),
+            indexnow_key=_indexnow_key(os.environ.get("INDEXNOW_KEY")),
+            usage_retention_days=_int("USAGE_RETENTION_DAYS", cls.usage_retention_days),
             push_mode=_push_mode(os.environ.get("PUSH_MODE")),
             push_allowed_domains=os.environ.get("PUSH_ALLOWED_DOMAINS", ""),
             push_deny_domains=os.environ.get("PUSH_DENY_DOMAINS", ""),

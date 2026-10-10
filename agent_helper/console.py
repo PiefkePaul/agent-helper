@@ -138,6 +138,7 @@ NAV = [
     ("Capabilities", "/admin/console/capabilities"),
     ("Directory", "/admin/console/directory"),
     ("Board", "/admin/console/board"),
+    ("Usage", "/admin/console/usage"),
     ("Log", "/admin/console/log"),
 ]
 
@@ -256,7 +257,12 @@ def _parse[M: BaseModel](model: type[M], data: dict[str, Any]) -> M:
 
 
 def build_console(
-    settings: Settings, store: Store, catalog: Catalog, notifier: Callable[[], Any], mail_limits: MailLimits
+    settings: Settings,
+    store: Store,
+    catalog: Catalog,
+    notifier: Callable[[], Any],
+    mail_limits: MailLimits,
+    flush_usage: Callable[[], None] = lambda: None,
 ) -> APIRouter:
     router = APIRouter(include_in_schema=False)
     sessions = Sessions()
@@ -824,4 +830,34 @@ def build_console(
         return _page("Log", body, csrf)
 
     router.add_api_route("/admin/console/log", view(log_page), methods=["GET"])
+
+    # --- anonymous usage counts (docs/decisions/0023) -------------------------------------------------
+
+    def usage_page(request: Request, csrf: str) -> HTMLResponse:
+        days = {"1": 1, "7": 7, "30": 30, "90": 90}.get(request.query_params.get("days", "7"), 7)
+        flush_usage()
+        rows = store.usage(days)
+        if not settings.usage_stats:
+            note = "<p class='flash err'>Counting is switched off (USAGE_STATS=false); older totals are shown.</p>"
+        else:
+            note = ""
+        links = " · ".join(f'<a href="/admin/console/usage?days={d}">{d} d</a>' for d in (1, 7, 30, 90))
+
+        table = "".join(
+            f"<tr><td>{e(r['metric'])}</td><td>{e(r['family'] or '-')}</td>"
+            f"<td>{r['count']}</td><td>{r['days']}</td><td>{e(r['last_day'])}</td></tr>"
+            for r in rows
+        )
+        body = (
+            f"{note}<p class='note'>Daily totals only: no addresses, no user agents, no times of day "
+            "(decision 0023). Client families come from the User-Agent header, MCP client names from the "
+            'clients themselves (only known names, others as "other"); both are easy to fake. '
+            "Monitoring and the console are not counted.</p>"
+            f"<p>Period: {links} (now {days} d)</p>"
+            "<table><tr><th>What</th><th>Client</th><th>Count</th><th>Days seen</th><th>Last day</th></tr>"
+            f"{table or '<tr><td colspan=5>Nothing counted yet.</td></tr>'}</table>"
+        )
+        return _page("Usage", body, csrf)
+
+    router.add_api_route("/admin/console/usage", view(usage_page), methods=["GET"])
     return router
