@@ -45,7 +45,7 @@ jobs:
       # Start the browser server as in production (read-only file system, only /tmp and the profile writable)
       # and make sure the browser comes up and stays up.
       - run: |
-          docker run -d --name browser --read-only --tmpfs /tmp --tmpfs /home/app:uid=10002,mode=0700 --shm-size 512m \
+          docker run -d --name browser --read-only --tmpfs /tmp:noexec,nosuid,nodev,size=256m --tmpfs /home/app:uid=10002,mode=0700,noexec,nosuid,nodev,size=64m --shm-size 512m \
             -e BROWSER_WS_PATH=ci-$(openssl rand -hex 16) -e EGRESS_PROXY=http://127.0.0.1:9 \
             agent-helper-browser:ci python -m agent_helper.browser_server
           sleep 30

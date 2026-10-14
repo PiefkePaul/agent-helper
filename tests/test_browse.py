@@ -375,3 +375,31 @@ def test_prepare_runtime_writes_every_os_variant(monkeypatch):
     monkeypatch.setitem(sys.modules, "camoufox.utils", fake)
     browser_server.prepare_runtime()
     assert calls == ["lin", "mac", "win"]
+
+
+def test_browser_lifetime_and_exit():
+    import threading
+
+    from agent_helper import browser_server as bs
+
+    assert 0.9 * bs.DEFAULT_LIFETIME <= bs.lifetime_seconds("") <= bs.DEFAULT_LIFETIME
+    assert bs.lifetime_seconds("0") == 0.0
+    assert 0.9 * bs.MIN_LIFETIME <= bs.lifetime_seconds("10") <= bs.MIN_LIFETIME
+    with pytest.raises(SystemExit):
+        bs.lifetime_seconds("1h")
+    assert bs.schedule_exit(0) is None
+    done = threading.Event()
+    codes = []
+    timer = bs.schedule_exit(0.01, lambda code: (codes.append(code), done.set()))
+    assert timer is not None and done.wait(2)
+    assert codes == [bs.RESTART_EXIT_CODE]
+
+
+def test_browser_container_hardening_in_examples():
+    from pathlib import Path
+
+    root = Path(__file__).parent.parent
+    compose = (root / "docker-compose.browse.example.yml").read_text()
+    for mount in ("/tmp:noexec,nosuid,nodev,size=", "/home/app:uid=10002,mode=0700,noexec,nosuid,nodev,size="):  # noqa: S108
+        assert mount in compose
+    assert "PYTHONNOUSERSITE=1" in (root / "Dockerfile.browser").read_text()

@@ -45,8 +45,11 @@ services:
     restart: unless-stopped
     read_only: true
     tmpfs:
-      - /tmp
-      - /home/app:uid=10002,mode=0700   # Firefox writes into HOME at start; nothing a page leaves behind survives a restart
+      - /tmp:noexec,nosuid,nodev,size=256m
+      # Firefox writes into HOME at start; nothing a page leaves behind survives a restart.
+      - /home/app:uid=10002,mode=0700,noexec,nosuid,nodev,size=64m
+    # The browser server ends itself after BROWSER_MAX_LIFETIME_SECONDS (default 6 hours) and the restart
+    # policy starts a fresh one, so no browser process lives long (docs/operations.md, "Web page reader").
     shm_size: 512m
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]

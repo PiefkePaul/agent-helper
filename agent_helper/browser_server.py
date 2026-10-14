@@ -10,7 +10,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import sys
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -136,6 +138,38 @@ def prepare_runtime() -> None:
         get_env_vars({}, os_key)
 
 
+DEFAULT_LIFETIME = 6 * 3600
+MIN_LIFETIME = 300
+RESTART_EXIT_CODE = 75  # EX_TEMPFAIL: also restarted by an on-failure policy
+
+
+def lifetime_seconds(raw: str) -> float:
+    """How long one browser server may live (BROWSER_MAX_LIFETIME_SECONDS, default 6 hours, at least 5
+    minutes; 0 turns the limit off). A little random spread keeps restarts from lining up."""
+    raw = raw.strip()
+    if not raw:
+        value = DEFAULT_LIFETIME
+    elif raw.isascii() and raw.isdecimal():
+        value = int(raw)
+    else:
+        raise SystemExit("BROWSER_MAX_LIFETIME_SECONDS must be a whole number of seconds")
+    if value == 0:
+        return 0.0
+    return max(value, MIN_LIFETIME) * random.uniform(0.9, 1.0)  # noqa: S311 (spread, not security)
+
+
+def schedule_exit(seconds: float, exit_: Callable[[int], Any] = os._exit) -> threading.Timer | None:
+    """End the whole process after `seconds`, so the container's restart policy starts a fresh browser:
+    whatever a page managed to leave in the browser does not outlive the limit. os._exit also ends the
+    browser it started."""
+    if seconds <= 0:
+        return None
+    timer = threading.Timer(seconds, exit_, args=(RESTART_EXIT_CODE,))
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 def main() -> None:
     if sys.argv[1:] == ["--prepare-runtime"]:
         prepare_runtime()
@@ -159,6 +193,7 @@ def main() -> None:
         return
     from camoufox.server import launch_server  # only in the browser image
 
+    schedule_exit(lifetime_seconds(os.environ.get("BROWSER_MAX_LIFETIME_SECONDS", "")))
     ws_path = os.environ.get("BROWSER_WS_PATH", "")
     if len(ws_path) < 16:
         raise SystemExit("BROWSER_WS_PATH must be a random path of at least 16 characters")

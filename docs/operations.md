@@ -213,7 +213,12 @@ each container gets only its own file):
    unless IPv6 is enabled on them; leaving `browse-out` without IPv6 avoids the question entirely.
 2. **browser**, Camoufox as a Playwright server (`python -m agent_helper.browser_server`, browser image
    `Dockerfile.browser`), on an internal network only. Do not reuse a browser instance that serves
-   anything else.
+   anything else. It runs read-only; only `/tmp` and the app user's home are writable, as tmpfs with
+   `noexec,nosuid,nodev` and a size limit (Firefox writes into HOME at start, so HOME must be such a tmpfs).
+   The server ends itself after `BROWSER_MAX_LIFETIME_SECONDS` (default 21600, 6 hours, with a little
+   random spread; `0` turns this off) with exit code 75, and the restart policy (`unless-stopped`) starts a
+   fresh browser, so nothing a page left behind lives long. A read in progress at that moment fails once;
+   the agent can try again.
 3. **browse-gateway** (`python -m agent_helper.browse_gateway`, browser image), on the browser's network
    and on an internal network shared with the service.
 
