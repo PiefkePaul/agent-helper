@@ -127,7 +127,20 @@ def check_model() -> None:
     ensure_fpgen_model()  # raises FpgenModelError if this user would have to write anything
 
 
+def prepare_runtime() -> None:
+    """Write the font configurations camoufox would otherwise create at the first launch, one for each OS it
+    may pretend to be, while building the image as root: at run time the file system is read-only."""
+    from camoufox.utils import get_env_vars  # only in the browser image
+
+    for os_key in ("lin", "mac", "win"):
+        get_env_vars({}, os_key)
+
+
 def main() -> None:
+    if sys.argv[1:] == ["--prepare-runtime"]:
+        prepare_runtime()
+        print("runtime files prepared")
+        return
     if sys.argv[1:] == ["--install-model"]:
         install_model()
         print("fpgen model installed and checked")

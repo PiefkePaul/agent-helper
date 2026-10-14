@@ -322,12 +322,21 @@ def test_browser_image_installs_the_model_as_root_before_the_fetch():
     checked (read) afterwards."""
     from pathlib import Path
 
-    lines = [ln.strip() for ln in (Path(__file__).parent.parent / "Dockerfile.browser").read_text().splitlines()]
-    install = next(i for i, ln in enumerate(lines) if "browser_server --install-model" in ln)
+    text = (Path(__file__).parent.parent / "Dockerfile.browser").read_text()
+    lines = [ln.strip() for ln in text.splitlines()]
+
+    def at(needle: str) -> int:
+        return next(i for i, ln in enumerate(lines) if needle in ln)
+
     user = lines.index("USER app")
-    fetch = next(i for i, ln in enumerate(lines) if "browser_server --fetch" in ln)
-    check = next(i for i, ln in enumerate(lines) if "browser_server --check-model" in ln)
-    assert install < user < fetch < check
+    # Installed as root: the model, the browser (outside the app user's home) and the runtime files.
+    assert at("ENV XDG_CACHE_HOME=/opt/") < at("--install-model") < at("--fetch") < at("--prepare-runtime") < user
+    # Checked as the app user, without writing.
+    assert user < at("--verify-build") and user < at("--check-model")
+    # Without the build secret GITHUB_TOKEN is not set at all (not even empty).
+    assert (
+        "if [ -s /run/secrets/github_token ]" in text and 'GITHUB_TOKEN="$(cat /run/secrets/github_token 2>' not in text
+    )
 
 
 def test_model_commands_call_camoufox(monkeypatch):
@@ -351,3 +360,18 @@ def test_model_commands_call_camoufox(monkeypatch):
     fake.is_pinned = lambda: True
     browser_server.check_model()
     assert calls == ["ensure", "ensure"]
+
+
+def test_prepare_runtime_writes_every_os_variant(monkeypatch):
+    import sys
+    import types
+
+    from agent_helper import browser_server
+
+    calls = []
+    fake = types.ModuleType("camoufox.utils")
+    fake.get_env_vars = lambda config, os_key: calls.append(os_key)
+    monkeypatch.setitem(sys.modules, "camoufox", types.ModuleType("camoufox"))
+    monkeypatch.setitem(sys.modules, "camoufox.utils", fake)
+    browser_server.prepare_runtime()
+    assert calls == ["lin", "mac", "win"]
