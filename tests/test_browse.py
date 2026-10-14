@@ -384,7 +384,8 @@ def test_browser_lifetime_and_exit():
 
     assert 0.9 * bs.DEFAULT_LIFETIME <= bs.lifetime_seconds("") <= bs.DEFAULT_LIFETIME
     assert bs.lifetime_seconds("0") == 0.0
-    assert 0.9 * bs.MIN_LIFETIME <= bs.lifetime_seconds("10") <= bs.MIN_LIFETIME
+    assert bs.lifetime_seconds("10") == bs.MIN_LIFETIME
+    assert all(bs.lifetime_seconds("300") >= bs.MIN_LIFETIME for _ in range(50))
     with pytest.raises(SystemExit):
         bs.lifetime_seconds("1h")
     assert bs.schedule_exit(0) is None

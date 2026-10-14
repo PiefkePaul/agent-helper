@@ -155,7 +155,8 @@ def lifetime_seconds(raw: str) -> float:
         raise SystemExit("BROWSER_MAX_LIFETIME_SECONDS must be a whole number of seconds")
     if value == 0:
         return 0.0
-    return max(value, MIN_LIFETIME) * random.uniform(0.9, 1.0)  # noqa: S311 (spread, not security)
+    spread = value * random.uniform(0.9, 1.0)  # noqa: S311 (spread, not security)
+    return max(spread, MIN_LIFETIME)  # the lower bound holds after the spread too
 
 
 def schedule_exit(seconds: float, exit_: Callable[[int], Any] = os._exit) -> threading.Timer | None:

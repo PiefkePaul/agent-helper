@@ -216,8 +216,9 @@ each container gets only its own file):
    anything else. It runs read-only; only `/tmp` and the app user's home are writable, as tmpfs with
    `noexec,nosuid,nodev` and a size limit (Firefox writes into HOME at start, so HOME must be such a tmpfs).
    The server ends itself after `BROWSER_MAX_LIFETIME_SECONDS` (default 21600, 6 hours, with a little
-   random spread; `0` turns this off) with exit code 75, and the restart policy (`unless-stopped`) starts a
-   fresh browser, so nothing a page left behind lives long. A read in progress at that moment fails once;
+   random spread, never below 300 seconds; `0` turns this off) with exit code 75. The container's main
+   process ends with it (with `init: true`, the init process exits too), which ends every process in the
+   container, the browser included; the restart policy (`unless-stopped`) then starts a fresh browser, so nothing a page left behind lives long. A read in progress at that moment fails once;
    the agent can try again.
 3. **browse-gateway** (`python -m agent_helper.browse_gateway`, browser image), on the browser's network
    and on an internal network shared with the service.

@@ -38,6 +38,7 @@ services:
   browser:
     build: { context: ., dockerfile: Dockerfile.browser }
     command: ["python", "-m", "agent_helper.browser_server"]
+    init: true                   # a minimal init as PID 1 reaps Firefox's child processes
     env_file: [browser.env]
     environment:
       EGRESS_PROXY: http://10.250.29.3:3128
