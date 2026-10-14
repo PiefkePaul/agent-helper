@@ -42,3 +42,13 @@ jobs:
           # The workflow's own short-lived token, only to lift GitHub's anonymous API rate limit.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: docker run --rm agent-helper-browser:ci python -m agent_helper.browser_server --check-model
+      # Start the browser server as in production (read-only file system, only /tmp and the profile writable)
+      # and make sure the browser comes up and stays up.
+      - run: |
+          docker run -d --name browser --read-only --tmpfs /tmp --tmpfs /home/app:uid=10002,mode=0700 --shm-size 512m \
+            -e BROWSER_WS_PATH=ci-$(openssl rand -hex 16) -e EGRESS_PROXY=http://127.0.0.1:9 \
+            agent-helper-browser:ci python -m agent_helper.browser_server
+          sleep 30
+          docker logs browser
+          test "$(docker inspect -f '{{.State.Running}}' browser)" = true
+          ! docker logs browser 2>&1 | grep -E "Traceback|Error"

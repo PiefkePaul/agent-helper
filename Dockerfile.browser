@@ -35,25 +35,38 @@ RUN sed -i \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10002 --create-home --home-dir /home/app app
 COPY agent_helper ./agent_helper
-# camoufox keeps fpgen's fingerprint model in site-packages, which belongs to root. Install the pinned model
-# (camoufox checks the archive and every file against its own pinned sha256) while still root; the app user
-# only reads it later (issue #45).
-RUN python -m agent_helper.browser_server --install-model
-
-USER app
-# Fetch the paired browser build. The downloaded archive itself is hashed and compared with the pinned
-# digest before it is unpacked (camoufox alone compares only with the digest GitHub reports).
-# camoufox asks the GitHub API which release to download; anonymous calls are rate-limited per address. An
-# optional build secret `github_token` (docker build --secret id=github_token,env=GITHUB_TOKEN) raises the
-# limit; it is mounted for this step only and never stored in the image.
-RUN --mount=type=secret,id=github_token,required=false,uid=10002 \
+# Everything the browser needs is installed as root and only read by the app user afterwards (issue #45):
+# - fpgen's fingerprint model, which camoufox keeps in site-packages (camoufox checks the archive and every
+#   file against its own pinned sha256);
+# - the browser build, in XDG_CACHE_HOME (camoufox's install directory is its user cache directory), not in
+#   the app user's writable home. The downloaded archive itself is hashed and compared with the pinned digest
+#   before it is unpacked (camoufox alone compares only with the digest GitHub reports);
+# - the runtime font configurations camoufox would otherwise write at the first launch, one per spoofed OS,
+#   so the browser container can run with a read-only file system. Firefox itself still writes into HOME at
+#   start (~/.camoufox and more), so the compose file mounts a tmpfs owned by app over /home/app.
+# camoufox asks the GitHub API which release to download, and anonymous calls are rate-limited per address.
+# An optional build secret `github_token` (docker build --secret id=github_token,env=GITHUB_TOKEN) lifts the
+# limit; it is mounted for this step only, never stored in the image, and without it GITHUB_TOKEN stays unset.
+ENV XDG_CACHE_HOME=/opt/browser-cache
+RUN --mount=type=secret,id=github_token,required=false \
     case "${TARGETARCH:-amd64}" in \
          amd64) expected="${CAMOUFOX_SHA256_AMD64}" ;; \
          arm64) expected="${CAMOUFOX_SHA256_ARM64}" ;; \
          *) echo "unsupported architecture ${TARGETARCH}" >&2; exit 1 ;; \
        esac \
-    && GITHUB_TOKEN="$(cat /run/secrets/github_token 2>/dev/null || true)" \
-       python -m agent_helper.browser_server --fetch "${expected}" \
+    && if [ -s /run/secrets/github_token ]; then GITHUB_TOKEN="$(cat /run/secrets/github_token)"; export GITHUB_TOKEN; fi \
+    && python -m agent_helper.browser_server --install-model \
+    && python -m agent_helper.browser_server --fetch "${expected}" \
+    && python -m agent_helper.browser_server --prepare-runtime \
+    && chmod -R a+rX,go-w "${XDG_CACHE_HOME}"
+
+USER app
+# The app user can use all of it without writing anything.
+RUN case "${TARGETARCH:-amd64}" in \
+         amd64) expected="${CAMOUFOX_SHA256_AMD64}" ;; \
+         arm64) expected="${CAMOUFOX_SHA256_ARM64}" ;; \
+       esac \
+    && python -m agent_helper.browser_server --verify-build "${expected}" \
     && python -m agent_helper.browser_server --check-model
 
 # No default command: the compose file starts either the browser server or the gateway.
