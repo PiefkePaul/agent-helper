@@ -109,7 +109,33 @@ def verify_build(expected_sha256: str, install_dir: Path | None = None) -> None:
         raise SystemExit(f"the fetched browser build does not match the pinned digest (found: {found or 'none'})")
 
 
+def install_model() -> None:
+    """Install fpgen's pinned fingerprint model (camoufox checks the archive and each file against its pinned
+    sha256). Run as the owner of site-packages, root, while building the image (issue #45)."""
+    from camoufox.fpgen_model import ensure_fpgen_model  # only in the browser image
+
+    ensure_fpgen_model()
+
+
+def check_model() -> None:
+    """Fail unless the pinned model is in place and usable by the current (unprivileged) user without writing:
+    camoufox calls the same function before every launch."""
+    from camoufox.fpgen_model import ensure_fpgen_model, is_pinned  # only in the browser image
+
+    if not is_pinned():
+        raise SystemExit("fpgen's pinned model is missing; run --install-model as root first")
+    ensure_fpgen_model()  # raises FpgenModelError if this user would have to write anything
+
+
 def main() -> None:
+    if sys.argv[1:] == ["--install-model"]:
+        install_model()
+        print("fpgen model installed and checked")
+        return
+    if sys.argv[1:] == ["--check-model"]:
+        check_model()
+        print("fpgen model is pinned and readable")
+        return
     if len(sys.argv) == 3 and sys.argv[1] == "--fetch":
         fetch_pinned(sys.argv[2])
         print("browser archive and build match the pinned digest")

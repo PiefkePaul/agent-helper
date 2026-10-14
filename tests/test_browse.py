@@ -315,3 +315,39 @@ def test_navigating_away_is_noted():
     out = _browser(lambda job: (200, result)).read("c", "https://example.org/")
     assert "moved itself" in out["note"] and "navigated_away" not in out
     assert "moved itself" not in _browser(lambda job: (200, OK)).read("c", "https://example.org/")["note"]
+
+
+def test_browser_image_installs_the_model_as_root_before_the_fetch():
+    """Issue #45: the model lives in root's site-packages, so it is installed before USER app and only
+    checked (read) afterwards."""
+    from pathlib import Path
+
+    lines = [ln.strip() for ln in (Path(__file__).parent.parent / "Dockerfile.browser").read_text().splitlines()]
+    install = next(i for i, ln in enumerate(lines) if "browser_server --install-model" in ln)
+    user = lines.index("USER app")
+    fetch = next(i for i, ln in enumerate(lines) if "browser_server --fetch" in ln)
+    check = next(i for i, ln in enumerate(lines) if "browser_server --check-model" in ln)
+    assert install < user < fetch < check
+
+
+def test_model_commands_call_camoufox(monkeypatch):
+    import sys
+    import types
+
+    from agent_helper import browser_server
+
+    calls = []
+    fake = types.ModuleType("camoufox.fpgen_model")
+    fake.ensure_fpgen_model = lambda: calls.append("ensure")
+    fake.is_pinned = lambda: False
+    monkeypatch.setitem(sys.modules, "camoufox", types.ModuleType("camoufox"))
+    monkeypatch.setitem(sys.modules, "camoufox.fpgen_model", fake)
+    browser_server.install_model()
+    assert calls == ["ensure"]
+    import pytest
+
+    with pytest.raises(SystemExit):
+        browser_server.check_model()
+    fake.is_pinned = lambda: True
+    browser_server.check_model()
+    assert calls == ["ensure", "ensure"]

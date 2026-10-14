@@ -35,6 +35,10 @@ RUN sed -i \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10002 --create-home --home-dir /home/app app
 COPY agent_helper ./agent_helper
+# camoufox keeps fpgen's fingerprint model in site-packages, which belongs to root. Install the pinned model
+# (camoufox checks the archive and every file against its own pinned sha256) while still root; the app user
+# only reads it later (issue #45).
+RUN python -m agent_helper.browser_server --install-model
 
 USER app
 # Fetch the paired browser build. The downloaded archive itself is hashed and compared with the pinned
@@ -44,6 +48,7 @@ RUN case "${TARGETARCH:-amd64}" in \
          arm64) expected="${CAMOUFOX_SHA256_ARM64}" ;; \
          *) echo "unsupported architecture ${TARGETARCH}" >&2; exit 1 ;; \
        esac \
-    && python -m agent_helper.browser_server --fetch "${expected}"
+    && python -m agent_helper.browser_server --fetch "${expected}" \
+    && python -m agent_helper.browser_server --check-model
 
 # No default command: the compose file starts either the browser server or the gateway.
