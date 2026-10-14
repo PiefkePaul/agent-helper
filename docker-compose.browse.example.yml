@@ -46,7 +46,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp
-      - /home/app/.camoufox:uid=10002,gid=10002,mode=0700   # Firefox's app directory; nothing a page leaves behind survives a restart
+      - /home/app:uid=10002,mode=0700   # Firefox writes into HOME at start; nothing a page leaves behind survives a restart
     shm_size: 512m
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
