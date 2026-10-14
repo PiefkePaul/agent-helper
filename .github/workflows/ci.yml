@@ -42,6 +42,12 @@ jobs:
           # The workflow's own short-lived token, only to lift GitHub's anonymous API rate limit.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: docker run --rm agent-helper-browser:ci python -m agent_helper.browser_server --check-model
+      - name: diagnose (temporary)
+        if: always()
+        run: |
+          docker run --rm agent-helper-browser:ci sh -c 'id; echo HOME=$HOME XDG=$XDG_CACHE_HOME; ls -la /home/app /tmp; ls -la /opt/browser-cache/camoufox | head'
+          docker run --rm -e BROWSER_WS_PATH=ci-0123456789abcdef -e EGRESS_PROXY=http://127.0.0.1:9 agent-helper-browser:ci             timeout 25 python -m agent_helper.browser_server 2>&1 | tail -30 || true
+          docker run --rm --read-only --tmpfs /tmp --tmpfs /home/app/.camoufox:uid=10002,gid=10002,mode=0700             agent-helper-browser:ci sh -c 'ls -la /tmp /home/app; touch /tmp/x && echo tmp-writable; mkdir /tmp/y && echo mkdir-ok'
       # Start the browser server as in production (read-only file system, only /tmp and the profile writable)
       # and make sure the browser comes up and stays up.
       - run: |
