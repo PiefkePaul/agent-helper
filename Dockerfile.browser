@@ -43,12 +43,17 @@ RUN python -m agent_helper.browser_server --install-model
 USER app
 # Fetch the paired browser build. The downloaded archive itself is hashed and compared with the pinned
 # digest before it is unpacked (camoufox alone compares only with the digest GitHub reports).
-RUN case "${TARGETARCH:-amd64}" in \
+# camoufox asks the GitHub API which release to download; anonymous calls are rate-limited per address. An
+# optional build secret `github_token` (docker build --secret id=github_token,env=GITHUB_TOKEN) raises the
+# limit; it is mounted for this step only and never stored in the image.
+RUN --mount=type=secret,id=github_token,required=false,uid=10002 \
+    case "${TARGETARCH:-amd64}" in \
          amd64) expected="${CAMOUFOX_SHA256_AMD64}" ;; \
          arm64) expected="${CAMOUFOX_SHA256_ARM64}" ;; \
          *) echo "unsupported architecture ${TARGETARCH}" >&2; exit 1 ;; \
        esac \
-    && python -m agent_helper.browser_server --fetch "${expected}" \
+    && GITHUB_TOKEN="$(cat /run/secrets/github_token 2>/dev/null || true)" \
+       python -m agent_helper.browser_server --fetch "${expected}" \
     && python -m agent_helper.browser_server --check-model
 
 # No default command: the compose file starts either the browser server or the gateway.

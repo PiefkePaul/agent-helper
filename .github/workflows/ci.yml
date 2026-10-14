@@ -37,5 +37,8 @@ jobs:
       - uses: actions/checkout@v4
       - run: >-
           docker build -f Dockerfile.browser --build-arg BASE_REGISTRY=public.ecr.aws/docker/library
-          -t agent-helper-browser:ci .
+          --secret id=github_token,env=GITHUB_TOKEN -t agent-helper-browser:ci .
+        env:
+          # The workflow's own short-lived token, only to lift GitHub's anonymous API rate limit.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: docker run --rm agent-helper-browser:ci python -m agent_helper.browser_server --check-model
