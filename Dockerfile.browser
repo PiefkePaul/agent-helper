@@ -42,7 +42,9 @@ COPY agent_helper ./agent_helper
 #   the app user's writable home. The downloaded archive itself is hashed and compared with the pinned digest
 #   before it is unpacked (camoufox alone compares only with the digest GitHub reports);
 # - the runtime font configurations camoufox would otherwise write at the first launch, one per spoofed OS,
-#   so the browser container can run with a read-only file system.
+#   so the browser container can run with a read-only file system;
+# - ~/.camoufox, the directory camoufox's Firefox looks for at start (its ~/.mozilla); it must exist even with
+#   a temporary profile, and the compose file mounts a tmpfs over it.
 # camoufox asks the GitHub API which release to download, and anonymous calls are rate-limited per address.
 # An optional build secret `github_token` (docker build --secret id=github_token,env=GITHUB_TOKEN) lifts the
 # limit; it is mounted for this step only, never stored in the image, and without it GITHUB_TOKEN stays unset.
@@ -57,7 +59,7 @@ RUN --mount=type=secret,id=github_token,required=false \
     && python -m agent_helper.browser_server --install-model \
     && python -m agent_helper.browser_server --fetch "${expected}" \
     && python -m agent_helper.browser_server --prepare-runtime \
-    && chmod -R a+rX,go-w "${XDG_CACHE_HOME}"
+    && chmod -R a+rX,go-w "${XDG_CACHE_HOME}"     && install -d -o app -g app -m 700 /home/app/.camoufox
 
 USER app
 # The app user can use all of it without writing anything.
