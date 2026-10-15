@@ -169,7 +169,12 @@ variable the relay behaves as before. The relay checks the TCP peer and never `X
 therefore see the real peer address. That is the case when uvicorn terminates TLS itself and the port is
 published by Docker's normal NAT (not the userland proxy) or the container uses the host network. Behind
 a reverse proxy every call comes from the proxy's address, so restrict there instead; the relay logs a
-warning when it sees a private caller address.
+warning when it sees a private caller address. When it refuses a caller, it looks the names up again at
+once (at most every 30 seconds), so a service whose address just changed is let in as soon as DNS has the
+new address. Meanwhile the service keeps notices for up to 15 minutes and signs each one only when the
+relay takes it, so a notice that waited still arrives inside the receivers' 5-minute window. Notices are
+kept in memory: a restart of the service in that time loses them (agents still find everything in their
+mailboxes).
 
 A host name in `RELAY_ALLOWED_CLIENTS` (and in the firewall's allowlist) is only as trustworthy as its
 DNS: whoever can change the record can admit their own address. Protect the account at the DNS or
