@@ -269,9 +269,29 @@ class PushManager:
         self._outbox.append((self.clock(), sub["id"], kind, sub["url"], sub["secret"], payload))
 
     def _flush(self, now: float) -> None:
+        too_old = 0
         while self._outbox and now - self._outbox[0][0] > OUTBOX_MAX_AGE:
             self._outbox.popleft()
-            log.warning("push notice dropped: the relay did not take it in time")
+            too_old += 1
+        if too_old:
+            log.warning("%d push notice(s) dropped: the relay did not take them in time", too_old)
+        # A notice goes out only if its subscription still exists unchanged: one deleted, suspended,
+        # expired or pointed elsewhere while the notice waited must not receive it.
+        kept: collections.deque[tuple[float, str, str, str, str, dict[str, Any]]] = collections.deque(
+            maxlen=self._outbox.maxlen
+        )
+        stale = 0
+        for entry in self._outbox:
+            _, sub_id, kind, url, secret, _ = entry
+            current = self.store.push_current(sub_id)
+            wanted = "pending" if kind == "verify" else "active"
+            if current is not None and current == (wanted, url, secret):
+                kept.append(entry)
+            else:
+                stale += 1
+        if stale:
+            log.info("%d push notice(s) dropped: their subscription changed or ended while they waited", stale)
+        self._outbox = kept
         while self._outbox:
             batch = [self._outbox[i] for i in range(min(MAX_JOBS_PER_CALL, len(self._outbox)))]
             # Signed now, with a fresh timestamp: the receiver's 5-minute window starts at hand-over.
