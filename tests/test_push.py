@@ -1197,3 +1197,86 @@ def test_relay_middleware_retries_a_refused_caller_once(tmp_path):
     assert (
         client.post("/v1/relay/jobs", content=body, headers=_signed("POST", "/v1/relay/jobs", body)).status_code == 200
     )
+
+
+def test_waiting_notices_to_deleted_or_changed_subscriptions_are_dropped(pushing):
+    client, push, sender, clock = pushing
+    token = _handle(client)
+    auth = {"Authorization": f"Bearer {token}"}
+    push.transport.up = False
+    client.put("/v1/handles/nova/push", json={"url": "https://hooks.example.com/in"}, headers=auth)
+    push.tick()  # the verification waits for the relay
+    client.delete("/v1/handles/nova/push", headers=auth)
+    push.transport.up = True
+    push.tick()
+    sender.run_due()
+    assert sender.post.calls == []  # deleted while waiting: nothing goes out
+
+    push.transport.up = False
+    client.put("/v1/handles/nova/push", json={"url": "https://hooks.example.com/in"}, headers=auth)
+    push.tick()
+    client.put("/v1/handles/nova/push", json={"url": "https://other.example.org/in"}, headers=auth)
+    push.transport.up = True
+    push.tick()
+    sender.run_due()
+    hosts = [c[0].host for c in sender.post.calls]
+    assert "hooks.example.com" not in hosts  # the old address never receives the waiting notice
+    assert hosts == ["other.example.org"]
+
+
+def test_dropped_old_notices_are_logged_once(pushing, caplog):
+    import logging
+
+    client, push, sender, clock = pushing
+    for name in ("nova", "orbit", "vega"):
+        token = _handle(client, name)
+        push.transport.up = False
+        client.put(
+            f"/v1/handles/{name}/push",
+            json={"url": f"https://{name}.example.com/in"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    push.tick()
+    clock.now += 16 * 60
+    push.transport.up = True
+    with caplog.at_level(logging.WARNING, logger="agent_helper.push"):
+        push.tick()
+    lines = [r for r in caplog.records if "did not take" in r.getMessage()]
+    assert len(lines) == 1 and lines[0].getMessage().startswith("3 push notice(s) dropped")
+
+
+def test_waiting_notices_to_expired_subscriptions_are_dropped(pushing):
+    client, push, sender, clock = pushing
+    store = client.app.state.store
+    token = _handle(client)
+    _verify(client, push, sender, token)
+    other = _handle(client, "orbit")
+    before = len(sender.post.calls)
+    push.transport.up = False
+    client.post("/v1/messages", json={"sender": "orbit", "to": "nova", "message": "x", "handle_token": other})
+    clock.now += 61
+    push.tick()  # the notice waits
+    assert len(push._outbox) == 1
+    store._db.execute("UPDATE push_subscriptions SET expires_at = '2000-01-01T00:00:00Z'")
+    push.transport.up = True
+    push.tick()
+    sender.run_due()
+    assert len(sender.post.calls) == before
+
+
+def test_a_refused_batch_stays_in_order(pushing):
+    client, push, sender, clock = pushing
+    for name in ("nova", "orbit"):
+        token = _handle(client, name)
+        client.put(
+            f"/v1/handles/{name}/push",
+            json={"url": f"https://{name}.example.com/in"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    push.transport.up = False
+    push.tick()
+    assert len(push._outbox) == 2
+    push.transport.up = True
+    push.tick()
+    sender.run_due()
+    assert [c[0].host for c in sender.post.calls] == ["nova.example.com", "orbit.example.com"]
