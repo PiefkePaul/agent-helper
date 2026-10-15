@@ -1963,13 +1963,13 @@ class Store:
         except MailRefused:
             pass  # a full mailbox must not keep the suspension from being saved
 
-    def push_current(self, sub_id: str) -> tuple[str, str, str] | None:
-        """(status, url, secret) of a subscription as it is now, or None if it no longer exists."""
+    def push_current(self, sub_id: str) -> tuple[str, str, str, str | None] | None:
+        """(status, url, secret, expires_at) of a subscription as it is now, or None if it no longer exists."""
         with self._lock:
             row = self._db.execute(
-                "SELECT status, url, secret FROM push_subscriptions WHERE id = ?", (sub_id,)
+                "SELECT status, url, secret, expires_at FROM push_subscriptions WHERE id = ?", (sub_id,)
             ).fetchone()
-        return (row["status"], row["url"], row["secret"]) if row else None
+        return (row["status"], row["url"], row["secret"], row["expires_at"]) if row else None
 
     def list_push_admin(self, limit: int = 200) -> list[dict[str, Any]]:
         with self._lock:

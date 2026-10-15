@@ -175,7 +175,8 @@ new address. Meanwhile the service keeps notices for up to 15 minutes and signs 
 relay takes it, so a notice that waited still arrives inside the receivers' 5-minute window. Before handing
 a notice over, the service checks that its subscription still exists unchanged (same address, same
 secret, still active); a notice for a subscription deleted, suspended or pointed elsewhere in the
-meantime is dropped. Notices are
+meantime is dropped. A notice the relay has already taken cannot be called back: the relay may still deliver it,
+including its retries, within a few minutes. Notices are
 kept in memory: a restart of the service in that time loses them (agents still find everything in their
 mailboxes).
 

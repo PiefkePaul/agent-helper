@@ -275,25 +275,19 @@ class PushManager:
             too_old += 1
         if too_old:
             log.warning("%d push notice(s) dropped: the relay did not take them in time", too_old)
-        # A notice goes out only if its subscription still exists unchanged: one deleted, suspended,
-        # expired or pointed elsewhere while the notice waited must not receive it.
-        kept: collections.deque[tuple[float, str, str, str, str, dict[str, Any]]] = collections.deque(
-            maxlen=self._outbox.maxlen
-        )
         stale = 0
-        for entry in self._outbox:
-            _, sub_id, kind, url, secret, _ = entry
-            current = self.store.push_current(sub_id)
-            wanted = "pending" if kind == "verify" else "active"
-            if current is not None and current == (wanted, url, secret):
-                kept.append(entry)
-            else:
-                stale += 1
-        if stale:
-            log.info("%d push notice(s) dropped: their subscription changed or ended while they waited", stale)
-        self._outbox = kept
         while self._outbox:
-            batch = [self._outbox[i] for i in range(min(MAX_JOBS_PER_CALL, len(self._outbox)))]
+            # Only the batch that goes out now is checked against its subscription as it is now: a notice
+            # for a subscription deleted, suspended, expired or pointed elsewhere while it waited is dropped.
+            batch = []
+            while self._outbox and len(batch) < MAX_JOBS_PER_CALL:
+                entry = self._outbox.popleft()
+                if self._still_wanted(entry):
+                    batch.append(entry)
+                else:
+                    stale += 1
+            if not batch:
+                break
             # Signed now, with a fresh timestamp: the receiver's 5-minute window starts at hand-over.
             jobs = [signed_job(kind, url, secret, payload) for _, _, kind, url, secret, payload in batch]
             try:
@@ -302,13 +296,28 @@ class PushManager:
                 )
             except (OSError, http.client.HTTPException, ssl.SSLError) as exc:
                 log.warning("push relay unreachable: %s", type(exc).__name__)
-                return
+                self._outbox.extendleft(reversed(batch))  # back to the front, in order
+                break
             if status != 200:
                 log.warning("push relay refused jobs: HTTP %s", status)
-                return
+                self._outbox.extendleft(reversed(batch))
+                break
             for (_, sub_id, kind, *_rest), job in zip(batch, jobs, strict=True):
-                self._outbox.popleft()
                 self._outstanding[job["job_id"]] = (sub_id, kind, now)
+        if stale:
+            log.info("%d push notice(s) dropped: their subscription changed or ended while they waited", stale)
+
+    def _still_wanted(self, entry: tuple[float, str, str, str, str, dict[str, Any]]) -> bool:
+        _, sub_id, kind, url, secret, _ = entry
+        current = self.store.push_current(sub_id)
+        if current is None:
+            return False
+        status, now_url, now_secret, expires_at = current
+        if (now_url, now_secret) != (url, secret):
+            return False
+        if kind == "verify":
+            return status == "pending"
+        return status == "active" and (expires_at is None or expires_at > _utc_now())
 
     def _collect(self, now: float) -> None:
         self._outstanding = {k: v for k, v in self._outstanding.items() if now - v[2] < OUTSTANDING_MAX_AGE}
