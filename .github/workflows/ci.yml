@@ -28,3 +28,17 @@ jobs:
       # The same pinned digest from AWS's public mirror of the official images: no Docker Hub pull limit,
       # no login or secret needed.
       - run: docker build --build-arg BASE_REGISTRY=public.ecr.aws/docker/library -t agent-helper:ci .
+
+  browser-image:
+    # The web page reader's image (Dockerfile.browser): fetches the pinned browser build and fingerprint model,
+    # so a broken build shows here and not first in deployment (issue #45).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          docker build -f Dockerfile.browser --build-arg BASE_REGISTRY=public.ecr.aws/docker/library
+          --secret id=github_token,env=GITHUB_TOKEN -t agent-helper-browser:ci .
+        env:
+          # The workflow's own short-lived token, only to lift GitHub's anonymous API rate limit.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: docker run --rm agent-helper-browser:ci python -m agent_helper.browser_server --check-model
