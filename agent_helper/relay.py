@@ -244,6 +244,7 @@ class ClientFilter:
         # take the others down with it.
         self._resolved: dict[str, tuple[set[ipaddress.IPv4Address | ipaddress.IPv6Address], float]] = {}
         self._tried_at = -1e18
+        self._forced_at = -1e18
         self._warned_private = False
         self._lock = threading.Lock()
 
@@ -271,6 +272,18 @@ class ClientFilter:
                 continue
             with self._lock:
                 self._resolved[host] = (found, now)
+
+    def refresh_after_refusal(self, min_interval: float = 30.0) -> bool:
+        """Look the names up again at once after refusing a caller (its address may just have changed),
+        at most every `min_interval` seconds whoever calls. True if a lookup ran."""
+        now = self.clock()
+        with self._lock:
+            if not self.hosts or now - self._forced_at < min_interval:
+                return False
+            self._forced_at = now
+            self._tried_at = -1e18
+        self.refresh_if_stale()
+        return True
 
     def allows(self, raw: str | None) -> bool:
         if not self.active:
@@ -547,8 +560,11 @@ def create_relay_app(
         # Before authentication, so strangers learn nothing and cost nothing. The address is the direct
         # peer: behind a proxy, restrict in the proxy (or its firewall) instead.
         await run_in_threadpool(clients.refresh_if_stale)
-        if not clients.allows(request.client.host if request.client else None):
-            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        peer = request.client.host if request.client else None
+        if not clients.allows(peer):
+            # The service's address may have changed since the last lookup: look again once (rate-limited).
+            if not (await run_in_threadpool(clients.refresh_after_refusal) and clients.allows(peer)):
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
         return await call_next(request)
 
     async def authenticate(request: Request) -> bytes:
