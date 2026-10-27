@@ -49,10 +49,11 @@ def test_operator_can_add_and_override_entries(client, admin_headers):
     assert client.put("/admin/v1/capabilities/Bad_Id", json=entry, headers=admin_headers).status_code == 422
 
 
-def test_invalid_entries_in_a_catalog_file_are_skipped(make_client, tmp_path):
+@pytest.mark.parametrize("invalid", [{"id": "broken"}, None, False, 42, "broken", []])
+def test_invalid_entries_in_a_catalog_file_are_skipped(make_client, tmp_path, invalid):
     path = tmp_path / "caps.json"
     good = {"id": "x", "title": "X", "summary": "x", "category": "tool", "availability": "available"}
-    path.write_text(json.dumps({"capabilities": [good, {"id": "broken"}]}), encoding="utf-8")
+    path.write_text(json.dumps({"capabilities": [invalid, good, invalid]}), encoding="utf-8")
     client = make_client(capabilities_file=path)
     assert [c["id"] for c in client.get("/v1/capabilities").json()["capabilities"]] == ["x"]
 
