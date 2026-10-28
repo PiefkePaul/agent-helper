@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import os
 
 import pytest
 
@@ -17,6 +18,17 @@ from agent_helper.stdio import (
 )
 
 MODERN = "2026-07-28"
+DIRECTORIES = [
+    "normal",
+    "research#1",
+    pytest.param(
+        "research?1",
+        marks=pytest.mark.skipif(os.name == "nt", reason="question marks are not valid Windows filenames"),
+    ),
+    "research%23",
+    "research notes",
+    "研究",
+]
 
 
 def run(tmp_path, *messages):
@@ -88,15 +100,17 @@ def test_nothing_leaves_a_stdio_instance(tmp_path):
     assert not local.push_enabled and not local.browse_enabled
 
 
-def test_a_database_of_another_instance_is_refused(tmp_path):
-    settings = Settings(public_base_url="http://testserver", data_dir=tmp_path)
+@pytest.mark.parametrize("directory", DIRECTORIES)
+def test_a_database_of_another_instance_is_refused(tmp_path, directory):
+    settings = Settings(public_base_url="http://testserver", data_dir=tmp_path / directory)
     create_app(settings)  # an HTTP server created this database
     with pytest.raises(Refused, match="another instance"):
         claim_database(settings.db_path)
 
 
-def test_a_new_or_own_database_is_accepted_but_only_once_at_a_time(tmp_path):
-    settings = Settings(public_base_url="http://testserver", data_dir=tmp_path)
+@pytest.mark.parametrize("directory", DIRECTORIES)
+def test_a_new_or_own_database_is_accepted_but_only_once_at_a_time(tmp_path, directory):
+    settings = Settings(public_base_url="http://testserver", data_dir=tmp_path / directory)
     with claim_database(settings.db_path):
         create_app(stdio_settings(settings))
         mark_database(settings.db_path)
