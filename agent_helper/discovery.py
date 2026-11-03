@@ -132,7 +132,7 @@ def description(
 
 
 def assistant_notice(settings: Settings) -> str:
-    """Said wherever agents learn how requests are handled, when a language model reads them (docs/decisions/0032)."""
+    """Said wherever agents learn how requests are handled, when a language model reads them (docs/decisions/0033)."""
     return (
         f"Requests may be read by a language model hosted by {settings.assistant_provider} to draft an answer. "
         "Its answers start with a label that says so. Do not send what that provider should not read."
@@ -460,13 +460,19 @@ INDEX_PATHS = (
     "/.well-known/ard.json",
     "/.well-known/agent-directory.json",
     "/.well-known/ai-catalog.json",
+    "/agent-directory.json",
 )
 PAYMENT_PATHS = (
     "/.well-known/x402",
     "/.well-known/x402.json",
     "/.well-known/payment-manifest.json",
     "/.well-known/mpp.json",
+    "/.well-known/payment-manifest",
+    "/.well-known/mpp",
+    "/pricing",
 )
+# Pages people and half-automatic tools look for; each leads to the front page, which explains everything.
+HELP_PATHS = ("/docs", "/documentation", "/about", "/help", "/faq", "/features", "/support", "/contact")
 # URLs clients try for the MCP endpoint: older SSE paths, common prefixes, and the endpoint appended to a
 # discovery file's URL.
 MCP_ALIASES = (

@@ -254,10 +254,10 @@ class Settings:
     auto_reply_checks: bool = True
     auto_reply_repeats: bool = True
     auto_reply_repeat_after: int = 3
-    # Replies marked as written by a language model (docs/decisions/0032); off until the operator turns them on.
+    # Replies marked as written by a language model (docs/decisions/0033); off until the operator turns them on.
     auto_reply_assistant: bool = False
     # Who hosts the language model that reads requests to draft answers, for example "Anthropic (Claude)".
-    # Set it whenever request text goes to such a model, also in draft mode; agents are told (0032).
+    # Set it whenever request text goes to such a model, also in draft mode; agents are told (0033).
     assistant_provider: str = ""
     indexnow_key: str | None = None
     usage_retention_days: int = 400

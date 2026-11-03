@@ -15,7 +15,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 
 from . import __version__, autoreply, discovery, helpdesk
 from .a2a import A2AEndpoint, agent_card, agent_card_v03
@@ -25,7 +25,7 @@ from .config import MIN_ADMIN_SECRET_LENGTH, Settings, parse_networks
 from .console import build_console
 from .handles import HANDLE_PATTERN, OPERATOR_HANDLE
 from .limits import GuardMiddleware, HeadAsGetMiddleware, TokenBucket, client_key
-from .mcp import McpEndpoint
+from .mcp import EMPTY_EVENT_STREAM, MODERN_VERSIONS, McpEndpoint
 from .models import (
     MAX_ID,
     AutoRepliesIn,
@@ -330,12 +330,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await mcp.handle(request)
 
     def mcp_other_methods(request: Request) -> Response:
-        """No standalone SSE stream and no sessions here (MCP 2026-07-28, legacy compatible). A client that
-        asks for an event stream gets 405, as the transport requires; anyone else gets a short description."""
+        """No sessions and no server-initiated messages here (docs/decisions/0032). A legacy client that opens
+        the GET event stream gets a valid, empty one that ends at once and asks not to reconnect for an hour;
+        a 2026-07-28 client gets 405, as that revision has no GET stream; anyone else a short description."""
         if request.method == "OPTIONS":
             return Response(status_code=204, headers={"Allow": "GET, POST, OPTIONS"})
-        if request.method == "DELETE" or "text/event-stream" in request.headers.get("accept", ""):
-            return Response(status_code=405, headers={"Allow": "POST"})
+        if request.method == "DELETE":
+            return Response(status_code=405, headers={"Allow": "GET, POST, OPTIONS"})
+        if "text/event-stream" in request.headers.get("accept", ""):
+            if request.headers.get("mcp-protocol-version") in MODERN_VERSIONS:
+                return Response(status_code=405, headers={"Allow": "POST"})
+            return Response(EMPTY_EVENT_STREAM, media_type="text/event-stream", headers={"Cache-Control": "no-store"})
         return JSONResponse(mcp.endpoint_info(), headers={"Allow": "GET, POST, OPTIONS"})
 
     async def mcp_post(request: Request) -> Response:
@@ -439,6 +444,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     for path in discovery.PAYMENT_PATHS:
         app.add_api_route(path, payment_info, methods=["GET"], include_in_schema=False)
+
+    def to_front_page() -> RedirectResponse:
+        return RedirectResponse("/", status_code=307, headers=public)
+
+    for path in discovery.HELP_PATHS:
+        app.add_api_route(path, to_front_page, methods=["GET"], include_in_schema=False)
 
     @app.get("/.well-known/glama.json", include_in_schema=False)
     def glama() -> JSONResponse:
@@ -967,7 +978,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def admin_set_auto_replies(body: AutoRepliesIn, request: Request) -> dict[str, Any]:
         if body.assistant and getattr(request.state, "via", None):
             # The chat bot may switch unchecked model answers off, never on: the kill switch must not depend on
-            # the automation that sends them (docs/decisions/0032).
+            # the automation that sends them (docs/decisions/0033).
             raise HTTPException(403, "only the admin secret can switch on answers by a language model")
         found = store.set_auto_reply_settings(body.checks, body.repeats, body.repeat_after, body.assistant)
         via = getattr(request.state, "via", "admin API")
@@ -980,7 +991,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @admin.post("/requests/{req_id}/replies")
     def admin_reply(req_id: str, body: OperatorReplyIn, request: Request) -> RequestOut:
         if body.author == "assistant" and not store.auto_reply_settings().assistant:
-            # The operator's kill switch for unchecked language model answers (docs/decisions/0032).
+            # The operator's kill switch for unchecked language model answers (docs/decisions/0033).
             raise HTTPException(409, "replies by a language model are switched off (auto-replies: assistant)")
         found = store.add_operator_reply(req_id, body.message, body.status, body.author)
         if found is None:

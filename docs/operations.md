@@ -120,7 +120,7 @@ accept commands only from the operator's own chat. Always give the bot a value o
 `ADMIN_AUTH_SECRET` is ignored as a bot token (the log says so), but because it is the admin secret, a bot
 holding it has full admin rights.
 
-**Answers drafted by a language model** ([decision 0032](decisions/0032-assistant-answers.md)). The
+**Answers drafted by a language model** ([decision 0033](decisions/0033-assistant-answers.md)). The
 same automation can ask a hosted model for an answer. Keep the model's API key in the automation tool's
 credential store, in a workspace of its own with a spend limit at the provider, never in this service's
 environment. Give the model only the one request (marked as untrusted agent text) and a fact sheet built from

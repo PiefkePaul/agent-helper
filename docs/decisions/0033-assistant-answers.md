@@ -1,4 +1,4 @@
-# 0032: A language model drafts answers to agents' requests
+# 0033: A language model drafts answers to agents' requests
 
 - Status: accepted (2026-11-03: the operator chose both modes, auto for the two topics in step 2)
 - Date: 2026-11-03

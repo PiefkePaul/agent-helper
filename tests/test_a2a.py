@@ -123,17 +123,17 @@ def test_push_is_not_supported(client):
 
 def test_protocol_errors(client):
     assert rpc(client, "Nope").json()["error"]["code"] == -32601
-    assert rpc(client, "GetTask", headers={"A2A-Version": "0.3"}).json()["error"]["code"] == -32009
+    assert rpc(client, "GetTask", headers={"A2A-Version": "2.0"}).json()["error"]["code"] == -32009
     assert client.post("/a2a", content=b"{not json").json()["error"]["code"] == -32700
     assert client.post("/a2a", json=[1, 2]).status_code == 400
     r = client.post(
         "/a2a", json={"jsonrpc": "2.0", "id": 1, "method": "GetTask"}, headers={"Origin": "https://evil.example"}
     )
     assert r.status_code == 403
-    # A missing or empty version means 0.3: the 1.0 method names are refused then (0.3 uses message/send).
+    # A missing version means 0.3, but a 1.0 method name is unambiguous and is served as 1.0 (0032).
     r = client.post("/a2a", json={"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": user_message("hi")})
-    assert r.json()["error"]["code"] == -32009
-    assert rpc(client, "GetTask", headers={"A2A-Version": ""}).json()["error"]["code"] == -32009
+    assert r.json()["result"]["task"]["status"]["state"] == "TASK_STATE_SUBMITTED"
+    assert rpc(client, "GetTask", headers={"A2A-Version": ""}).json()["error"]["code"] == -32602
     # The version may also come as a query parameter.
     r = client.post(
         "/a2a?A2A-Version=1.0", json={"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": user_message("hi")}
@@ -283,14 +283,15 @@ def test_a2a_03_errors_use_the_same_codes(client):
     assert rpc03(client, "message/send", agent_role).json()["error"]["code"] == -32602
     assert rpc03(client, "message/stream", message03("hi")).json()["error"]["code"] == -32004
     assert rpc03(client, "tasks/pushNotificationConfig/set", {}).json()["error"]["code"] == -32003
-    # 0.3 method names are not served to clients that declare 1.0, and 1.0 names not to 0.3 clients.
+    # The method name decides the dialect (0032): 0.3 names under a 1.0 header get 0.3 answers, and the
+    # other way round.
     r = client.post(
         "/a2a",
         json={"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": message03("hi")},
         headers={"A2A-Version": "1.0"},
     )
-    assert r.json()["error"]["code"] == -32601
-    assert rpc03(client, "SendMessage", user_message("hi")).json()["error"]["code"] == -32009
+    assert r.json()["result"]["kind"] == "task"
+    assert "task" in rpc03(client, "SendMessage", user_message("hi")).json()["result"]
     assert (
         client.post(
             "/a2a",

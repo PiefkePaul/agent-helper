@@ -3,7 +3,8 @@
 - `SendMessage` without a task id starts a request: the task id is the request id, and the follow-up token
   comes back once in `task.metadata.followUpToken`.
 - `SendMessage` with a task id adds to that conversation, `GetTask` reads it, `CancelTask` closes it. These
-  need `Authorization: Bearer <followUpToken>`; the token never goes into a URL.
+  need `Authorization: Bearer <followUpToken>` (or the token in the body's metadata, for clients that cannot
+  set headers); the token never goes into a URL.
 - Agent text is untrusted data. Only text parts are accepted. No streaming, no push notifications.
 - A2A 0.3 clients (no `A2A-Version` header, methods `message/send`, `tasks/get`, `tasks/cancel`) are served
   too (docs/decisions/0024): their requests are translated to the 1.0 calls above, and answers come back in
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import secrets
 from typing import Any
 from urllib.parse import urlsplit
@@ -61,7 +63,9 @@ V03_PUSH_METHODS = {
     "tasks/pushNotificationConfig/list",
     "tasks/pushNotificationConfig/delete",
 }
-V03_VERSIONS = ("", "0.3", "0.3.0")  # a missing A2A-Version header means 0.3
+# A missing A2A-Version header means 0.3. 0.2.x used the same method names; a patch number is tolerated.
+V03_VERSION = re.compile(r"0\.[23](?:\.\d{1,4})?")
+V10_VERSION = re.compile(r"1\.0(?:\.\d{1,4})?")
 V03_STATE = {
     "TASK_STATE_SUBMITTED": "submitted",
     "TASK_STATE_INPUT_REQUIRED": "input-required",
@@ -118,7 +122,8 @@ def agent_card(settings: Settings) -> dict[str, Any]:
                     "scheme": "Bearer",
                     "description": "Not needed to start. SendMessage without a taskId returns the task and, once, "
                     "metadata.followUpToken. Send it as 'Authorization: Bearer <token>' for GetTask, CancelTask "
-                    "and SendMessage with that taskId.",
+                    "and SendMessage with that taskId (clients that cannot set headers may send it as "
+                    "metadata.followUpToken in the request instead).",
                 }
             }
         },
@@ -255,9 +260,52 @@ def _v03_direct_message(message: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _dialect(version: str) -> str | None:
+    """The A2A dialect a version header asks for ("1.0" or "0.3"), or None for a version not served here."""
+    if not version or V03_VERSION.fullmatch(version):
+        return "0.3"
+    return "1.0" if V10_VERSION.fullmatch(version) else None
+
+
 def _bearer(request: Request) -> str | None:
     value = request.headers.get("authorization", "")
     return value[7:].strip() or None if value.lower().startswith("bearer ") else None
+
+
+def _body_token(params: dict[str, Any]) -> str | None:
+    """The follow-up token from the request body, for clients that cannot set an Authorization header:
+    params.metadata.followUpToken, or message.metadata.followUpToken on SendMessage. Never from a URL."""
+    message = params.get("message")
+    for holder in (params, message if isinstance(message, dict) else {}):
+        meta = holder.get("metadata")
+        value = meta.get("followUpToken") if isinstance(meta, dict) else None
+        if isinstance(value, str) and 0 < len(value) <= 128:
+            return value
+    return None
+
+
+TASK_ID_PREFIX = "req_"
+
+
+def _task_not_found(usage: Usage, task_id: str, token: str | None) -> A2AError:
+    """TaskNotFound, with a hint that depends only on what the caller sent (never on whether the task exists)."""
+    if token is None:
+        usage.count("a2a:task-not-found:no-token")
+        return A2AError(
+            TASK_NOT_FOUND,
+            "task not found: a task here is read with the followUpToken that came back once in the task's "
+            "metadata when it was created; send it as 'Authorization: Bearer <token>' or as "
+            "params.metadata.followUpToken",
+        )
+    if not task_id.startswith(TASK_ID_PREFIX):
+        usage.count("a2a:task-not-found:foreign-id")
+        return A2AError(
+            TASK_NOT_FOUND,
+            f"task not found: task ids here start with '{TASK_ID_PREFIX}' and are returned when a message "
+            "starts a task; message or context ids chosen by the client are not task ids here",
+        )
+    usage.count("a2a:task-not-found:wrong-token")
+    return A2AError(TASK_NOT_FOUND, "task not found or wrong token")
 
 
 PART_KINDS = ("text", "raw", "url", "data")
@@ -401,20 +449,24 @@ class A2AEndpoint:
             isinstance(msg_id, int) and not isinstance(msg_id, bool)
         ):
             return _error(None, INVALID_REQUEST, "id must be a string or an integer", 400)
-        # A2A 1.0 clients send the version; an empty or missing one means 0.3, served with the 0.3 method names.
+        # A2A 1.0 clients send the version; an empty or missing one means 0.3. The method names of the two
+        # dialects never overlap, so the name decides how a request is served (docs/decisions/0032); the
+        # header only turns away versions that are not served at all.
         version = (request.headers.get("a2a-version") or request.query_params.get("A2A-Version") or "").strip()
         method = msg["method"]
         request.state.rpc_method = method
-        v03 = version in V03_VERSIONS and (method in V03_METHODS or method in V03_UNSUPPORTED | V03_PUSH_METHODS)
-        if version != PROTOCOL_VERSION and not v03:
-            shown = version[:20] or "missing (means 0.3)"
-            self.usage.count("a2a:version-refused:" + ("0.3" if version in V03_VERSIONS else "other"))
+        dialect = _dialect(version)
+        if dialect is None:
+            self.usage.count("a2a:version-refused:other")
             return _error(
                 msg_id,
                 VERSION_NOT_SUPPORTED,
-                f"A2A version {shown} is not supported for {method[:64]}; send A2A-Version: 1.0 with the 1.0 "
-                "methods, or use the 0.3 methods message/send, tasks/get and tasks/cancel",
+                f"A2A version {version[:20]} is not supported; send A2A-Version: 1.0 with the 1.0 methods, or "
+                "no version (0.3) with the 0.3 methods message/send, tasks/get and tasks/cancel",
             )
+        v03 = method in V03_METHODS or method in V03_UNSUPPORTED | V03_PUSH_METHODS
+        if v03 != (dialect == "0.3"):
+            self.usage.count("a2a:dialect:mixed")
         params = msg.get("params", {})
         if not isinstance(params, dict):
             return _error(msg_id, INVALID_PARAMS, "params must be an object")
@@ -430,7 +482,7 @@ class A2AEndpoint:
                     params = {**params, "message": _from_v03_message(params.get("message"))}
                 except A2AError as exc:
                     return _error(msg_id, exc.code, str(exc))
-        token = _bearer(request)
+        token = _bearer(request) or _body_token(params)
         known = method in ("SendMessage", "GetTask", "CancelTask") or method in PUSH_METHODS or method in UNSUPPORTED
         self.usage.count(f"a2a:method:{method if known else 'unknown'}")
         try:
@@ -472,10 +524,11 @@ class A2AEndpoint:
             return _rest_error(INVALID_REQUEST, "origin not allowed")
         version = (request.headers.get("a2a-version") or request.query_params.get("A2A-Version") or "").strip()
         method = {"send": "SendMessage", "get": "GetTask", "cancel": "CancelTask"}[action]
-        if version != PROTOCOL_VERSION and version not in V03_VERSIONS:
+        dialect = _dialect(version)
+        if dialect is None:
             self.usage.count(usage_module.refusal_metric("a2a", method, VERSION_NOT_SUPPORTED))
             return _rest_error(VERSION_NOT_SUPPORTED, f"A2A version {version[:20]} is not supported; use 1.0")
-        v03 = version != PROTOCOL_VERSION
+        v03 = dialect == "0.3"
         self.usage.count(f"a2a:rest:{method}" + (":0.3" if v03 else ""))
         token = _bearer(request)
         try:
@@ -487,10 +540,19 @@ class A2AEndpoint:
                     raise A2AError(INVALID_PARAMS, "the body must be one JSON object") from None
                 if not isinstance(params, dict):
                     raise A2AError(INVALID_PARAMS, "the body must be one JSON object")
+                message = params.get("message")
+                if v03 and not version and isinstance(message, dict) and message.get("role") == "ROLE_USER":
+                    v03 = False  # a 1.0 message without the header: its role name says which dialect (0032)
                 if v03:
-                    params = {**params, "message": _from_v03_message(params.get("message"))}
+                    params = {**params, "message": _from_v03_message(message)}
+                token = token or _body_token(params)
                 result = await run_in_threadpool(self._send_message, request, params, token)
-                body: dict[str, Any] = to_v03_task(result["task"]) if v03 else result
+                if not v03:
+                    body: dict[str, Any] = result
+                elif "message" in result:
+                    body = _v03_direct_message(result["message"])  # the web page reader answers without a task
+                else:
+                    body = to_v03_task(result["task"])
             elif action == "get":
                 raw = request.query_params.get("historyLength")
                 plain = raw is not None and raw.isascii() and raw.isdecimal() and len(raw) <= 9
@@ -555,7 +617,7 @@ class A2AEndpoint:
                 raise A2AError(INVALID_PARAMS, "the message contains characters that are not allowed") from None
             current = self.store.get_request(task_id, token) if token else None
             if current is None:
-                raise A2AError(TASK_NOT_FOUND, "task not found or wrong token")
+                raise _task_not_found(self.usage, task_id, token)
             if current["status"] == "closed":
                 raise A2AError(UNSUPPORTED_OPERATION, "this task is closed; start a new task and mention its id")
             self._charge_write(request)
@@ -632,7 +694,7 @@ class A2AEndpoint:
             raise A2AError(INVALID_PARAMS, "historyLength must be a non-negative integer")
         view = self.store.get_request(task_id, token) if token else None
         if view is None:
-            raise A2AError(TASK_NOT_FOUND, "task not found or wrong token")
+            raise _task_not_found(self.usage, task_id, token)
         return _task(view, history_length)
 
     def _cancel_task(self, request: Request, params: dict[str, Any], token: str | None) -> dict[str, Any]:
@@ -641,7 +703,7 @@ class A2AEndpoint:
             raise A2AError(INVALID_PARAMS, "params.id must be the task id")
         current = self.store.get_request(task_id, token) if token else None
         if current is None or token is None:
-            raise A2AError(TASK_NOT_FOUND, "task not found or wrong token")
+            raise _task_not_found(self.usage, task_id, token)
         if current["status"] == "closed":
             raise A2AError(TASK_NOT_CANCELABLE, "this task is already closed")
         self._charge_write(request)

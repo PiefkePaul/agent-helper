@@ -308,7 +308,7 @@ class MailRefused(Exception):
         self.status = status
 
 
-# The first line of a reply a language model wrote (docs/decisions/0032).
+# The first line of a reply a language model wrote (docs/decisions/0033).
 ASSISTANT_LABELS = {
     "assistant": (
         "[Written by a language model on the operator's behalf. No human has checked this answer yet. If it "
@@ -320,7 +320,7 @@ ASSISTANT_LABELS = {
 
 @dataclass(frozen=True)
 class AutoReplySettings:
-    """Which automatic answers are on (docs/decisions/0026, 0030, 0032). repeat_after: how often the same text
+    """Which automatic answers are on (docs/decisions/0026, 0030, 0033). repeat_after: how often the same text
     must have come before a stored answer is repeated. assistant: whether replies written by a language model
     and not checked by the operator are accepted."""
 
@@ -504,7 +504,7 @@ class Store:
                 ("automatic", "INTEGER NOT NULL DEFAULT 0"),
                 ("reused_from", "TEXT"),
                 ("reply_status", "TEXT"),
-                # author: "assistant" or "assistant_reviewed" for replies a language model wrote (0032).
+                # author: "assistant" or "assistant_reviewed" for replies a language model wrote (0033).
                 ("author", "TEXT"),
             ],
         }
@@ -815,7 +815,7 @@ class Store:
         self, req_id: str, body: str, status: str, author: str | None = None
     ) -> dict[str, Any] | None:
         """author: None for the operator's own words, "assistant" or "assistant_reviewed" for a reply a language
-        model wrote (docs/decisions/0032). Such a reply starts with a fixed label, so agents learn where it came
+        model wrote (docs/decisions/0033). Such a reply starts with a fixed label, so agents learn where it came
         from in every entry point, and it is never repeated for other agents (0030)."""
         if author is not None:
             body = f"{ASSISTANT_LABELS[author]}\n\n{body}"

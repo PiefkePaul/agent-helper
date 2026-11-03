@@ -253,7 +253,7 @@ def _latest(messages: list[dict[str, Any]]) -> str:
 
 
 def _sender(message: dict[str, Any]) -> str:
-    if message.get("author") == "assistant":  # docs/decisions/0032
+    if message.get("author") == "assistant":  # docs/decisions/0033
         return "language model, not checked"
     if message.get("author") == "assistant_reviewed":
         return "operator (drafted by a language model)"

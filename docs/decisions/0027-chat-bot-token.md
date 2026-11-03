@@ -20,7 +20,7 @@ change the catalog.
    - `GET /admin/v1/requests` (for example `?status=open`),
    - `GET /admin/v1/requests/{id}`,
    - `POST /admin/v1/requests/{id}/replies` with `{"message": "...", "status": "answered" | "closed"}`
-     (optionally `"author"` for answers a language model wrote, added later, see 0032),
+     (optionally `"author"` for answers a language model wrote, added later, see 0033),
    - `GET` and `PATCH /admin/v1/settings/auto-replies`: whether automatic answers are on and how often a
      question must repeat before it is answered automatically (added later, see 0030).
 2. It is compared in constant time and works only where the operator API is served: on `ADMIN_PORT`, or

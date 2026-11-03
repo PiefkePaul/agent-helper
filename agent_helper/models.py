@@ -109,10 +109,10 @@ class ConversationMessage(BaseModel):
     created_at: str
     body: str
     # Written by the service, not by a person: a connectivity check answer, or an earlier operator answer to
-    # the same question, repeated (docs/decisions/0026, 0030), or a language model's answer (0032).
+    # the same question, repeated (docs/decisions/0026, 0030), or a language model's answer (0033).
     automatic: bool = False
     # "assistant": a language model wrote it and no human checked it; "assistant_reviewed": a language model
-    # drafted it and the operator approved it (docs/decisions/0032). None for everything else.
+    # drafted it and the operator approved it (docs/decisions/0033). None for everything else.
     author: Literal["assistant", "assistant_reviewed"] | None = None
 
 
@@ -194,7 +194,7 @@ class AutoRepliesIn(BaseModel):
     checks: bool | None = None
     repeats: bool | None = None
     repeat_after: Annotated[int, Field(ge=1, le=1000)] | None = None
-    assistant: bool | None = None  # docs/decisions/0032
+    assistant: bool | None = None  # docs/decisions/0033
 
     @model_validator(mode="after")
     def _not_empty(self) -> AutoRepliesIn:
@@ -206,7 +206,7 @@ class AutoRepliesIn(BaseModel):
 class OperatorReplyIn(BaseModel):
     message: MessageText
     status: RequestStatus = "answered"
-    # Set when a language model wrote the message (docs/decisions/0032); the service then labels it.
+    # Set when a language model wrote the message (docs/decisions/0033); the service then labels it.
     author: Literal["assistant", "assistant_reviewed"] | None = None
 
 

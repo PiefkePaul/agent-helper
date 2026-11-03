@@ -101,6 +101,14 @@ NAMED = {
     "/.well-known/x402.json": "compat:payment",
     "/.well-known/payment-manifest.json": "compat:payment",
     "/.well-known/mpp.json": "compat:payment",
+    # Answered since docs/decisions/0032.
+    "/agent-directory.json": "compat:index",
+    "/.well-known/payment-manifest": "compat:payment",
+    "/.well-known/mpp": "compat:payment",
+    "/pricing": "compat:payment",
+    **dict.fromkeys(
+        ("/docs", "/documentation", "/about", "/help", "/faq", "/features", "/support", "/contact"), "compat:help-page"
+    ),
 }
 # Other URLs clients try for the MCP endpoint (docs/decisions/0028), counted together by method.
 MCP_ALIAS_PATHS = frozenset(
