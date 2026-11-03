@@ -17,7 +17,9 @@ def test_well_known_description_lists_endpoints_and_hashing(client):
 
 def test_openapi_is_public_but_interactive_docs_are_off(client):
     assert client.get("/openapi.json").status_code == 200
-    assert client.get("/docs").status_code == 404
+    # /docs is not the interactive API browser; it leads to the front page like the other help pages.
+    docs = client.get("/docs", follow_redirects=False)
+    assert docs.status_code == 307 and docs.headers["location"] == "/"
     assert client.get("/redoc").status_code == 404
 
 

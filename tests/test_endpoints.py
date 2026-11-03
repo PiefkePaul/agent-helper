@@ -26,7 +26,8 @@ def test_mcp_aliases_reach_the_same_endpoint(client, path):
     headers = {"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list"}
     assert client.post(path, json=body, headers=headers).json() == modern(client, "tools/list").json()
     assert client.get(path).status_code == 200
-    assert client.get(path, headers={"Accept": "text/event-stream"}).status_code == 405
+    sse = client.get(path, headers={"Accept": "text/event-stream"})
+    assert sse.status_code == 200 and sse.headers["content-type"].startswith("text/event-stream")
 
 
 def test_a2a_info_health_and_card_next_to_the_endpoint(client):
@@ -61,7 +62,7 @@ def test_a2a_rest_binding_0_3_and_errors(client):
     assert missing.status_code == 404 and missing.json()["error"]["status"] == "TASK_NOT_FOUND"
     bad = client.post("/a2a/v1/message:send", content=b"{nope", headers={"A2A-Version": "1.0"})
     assert bad.status_code == 400
-    other = client.post("/a2a/v1/message:send", json=user_message("hi"), headers={"A2A-Version": "0.2"})
+    other = client.post("/a2a/v1/message:send", json=user_message("hi"), headers={"A2A-Version": "2.0"})
     assert other.status_code == 400 and other.json()["error"]["status"] == "VERSION_NOT_SUPPORTED"
     files = {"message": {"role": "ROLE_USER", "parts": [{"url": "https://x.example/f"}]}}
     unsupported = client.post("/a2a/v1/message:send", json=files, headers={"A2A-Version": "1.0"})
