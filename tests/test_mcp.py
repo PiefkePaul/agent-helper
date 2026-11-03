@@ -79,9 +79,19 @@ def test_notification_is_accepted_without_body(client):
     assert r.content == b""
 
 
-def test_get_and_delete_are_not_allowed(client):
-    # A client asking for the standalone SSE stream gets 405, as the transport requires.
-    assert client.get("/mcp", headers={"Accept": "text/event-stream"}).status_code == 405
+def test_get_stream_is_empty_and_delete_not_allowed(client):
+    # A legacy client opening the GET stream gets a valid one that stays empty and asks not to reconnect soon.
+    sse = client.get("/mcp", headers={"Accept": "text/event-stream"})
+    assert sse.status_code == 200 and sse.headers["content-type"].startswith("text/event-stream")
+    assert "retry: 3600000" in sse.text and "data:" not in sse.text
+    assert (
+        client.get("/mcp", headers={"Accept": "text/event-stream", "MCP-Protocol-Version": "2025-06-18"}).status_code
+        == 200
+    )
+    # The 2026-07-28 revision has no GET stream: 405, as it asks.
+    assert (
+        client.get("/mcp", headers={"Accept": "text/event-stream", "MCP-Protocol-Version": MODERN}).status_code == 405
+    )
     assert client.delete("/mcp").status_code == 405
     # Anyone else gets a short description instead of an error.
     info = client.get("/mcp")

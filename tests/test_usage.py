@@ -152,13 +152,14 @@ def test_a2a_methods_and_version_refusals_are_counted(client, admin_headers):
     body = {"jsonrpc": "2.0", "id": 1, "method": "GetTask", "params": {"id": "x"}}
     client.post("/a2a", json=body, headers={"A2A-Version": "1.0"})
     client.post("/a2a", json={**body, "method": "tasks/get"})  # A2A 0.3, served
-    client.post("/a2a", json=body)  # a 1.0 method without the 1.0 header
-    client.post("/a2a", json=body, headers={"A2A-Version": "0.2"})
+    client.post("/a2a", json=body)  # a 1.0 method without the 1.0 header: served as 1.0, counted as mixed
+    client.post("/a2a", json=body, headers={"A2A-Version": "2.0"})
     c = counts(client, admin_headers)
-    assert c[("a2a:method:GetTask", "")] == 2
+    assert c[("a2a:method:GetTask", "")] == 3
     assert c[("a2a:dialect:0.3", "")] == 1
-    assert c[("a2a:version-refused:0.3", "")] == 1
+    assert c[("a2a:dialect:mixed", "")] == 1
     assert c[("a2a:version-refused:other", "")] == 1
+    assert c[("a2a:task-not-found:no-token", "")] == 3
 
 
 def test_usage_stats_off(make_client, admin_headers):
@@ -214,13 +215,21 @@ def test_indexnow_key_is_validated(monkeypatch):
 
 
 def test_refused_calls_are_counted_by_protocol_method_and_reason(client, admin_headers):
-    client.post("/a2a", json={"jsonrpc": "2.0", "id": 1, "method": "GetTask", "params": {"id": "x"}})  # no version
+    client.post(
+        "/a2a",
+        json={"jsonrpc": "2.0", "id": 1, "method": "GetTask", "params": {"id": "x"}},
+        headers={"A2A-Version": "9.9"},
+    )  # a version not served
     client.post(
         "/a2a",
         json={"jsonrpc": "2.0", "id": 1, "method": "GetTask", "params": {"id": "x"}},
         headers={"A2A-Version": "1.0"},
     )  # no token: task not found
-    client.post("/a2a", json={"jsonrpc": "2.0", "id": 1, "method": "made-up/thing <script>", "params": {}})
+    client.post(
+        "/a2a",
+        json={"jsonrpc": "2.0", "id": 1, "method": "made-up/thing <script>", "params": {}},
+        headers={"A2A-Version": "9.9"},
+    )
     client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {}})
     client.post("/v1/requests", json={"message": ""})  # 422
     client.get("/v1/requests/req_x", headers={"Authorization": "Bearer wrong"})  # 404

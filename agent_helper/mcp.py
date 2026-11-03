@@ -5,7 +5,8 @@ Serves both MCP eras on one endpoint, as the 2026-07-28 revision allows:
 - legacy clients (2025-03-26 to 2025-11-25) open with `initialize`. No session id is ever issued, which the
   legacy revisions permit, so every request is answered on its own.
 
-Only tools are offered. Responses are single JSON objects, never SSE streams.
+Only tools are offered. Responses are single JSON objects; the GET event stream of the legacy revisions is
+offered but always empty (docs/decisions/0032).
 """
 
 from __future__ import annotations
@@ -76,6 +77,11 @@ HEADER_MISMATCH = -32020
 UNSUPPORTED_PROTOCOL_VERSION = -32022
 
 TOOL_LIST_TTL_MS = 3_600_000
+# What a legacy client gets when it opens the GET event stream: a comment, and a reconnect delay of one hour.
+EMPTY_EVENT_STREAM = (
+    ": agent-helper sends no server-initiated messages. POST each request to this URL; the answer comes in "
+    "the response.\nretry: 3600000\n\n"
+)
 NOT_FOUND = "not found or wrong token"
 
 INSTRUCTIONS = (
@@ -797,6 +803,19 @@ def _valid_id(msg_id: Any) -> bool:
     return isinstance(msg_id, int) and not isinstance(msg_id, bool)
 
 
+def _version_kind(requested: Any) -> str:
+    """A refused protocol version as one of a fixed set of labels, for the usage counts (never the value)."""
+    if not isinstance(requested, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", requested):
+        return "other"
+    return (
+        "newer"
+        if requested > max(SUPPORTED_VERSIONS)
+        else "older"
+        if requested < min(SUPPORTED_VERSIONS)
+        else "between"
+    )
+
+
 def _error(msg_id: Any, code: int, message: str, status: int, data: Any = None) -> JSONResponse:
     error: dict[str, Any] = {"code": code, "message": message}
     if data is not None:
@@ -872,8 +891,8 @@ class McpEndpoint:
         return {
             "name": "agent-helper",
             "protocol": "MCP, Streamable HTTP, stateless",
-            "how": f"POST JSON-RPC 2.0 to {base}/mcp. No standalone SSE stream (GET with Accept: "
-            "text/event-stream answers 405), no sessions, no authentication.",
+            "how": f"POST JSON-RPC 2.0 to {base}/mcp; every answer comes in the response. No sessions, no "
+            "authentication, no server-initiated messages (a GET event stream ends at once and stays empty).",
             "protocol_versions": list(SUPPORTED_VERSIONS),
             "server_card": f"{base}/.well-known/mcp/server-card.json",
             "docs": f"{base}/llms.txt",
@@ -952,21 +971,28 @@ class McpEndpoint:
                 },
             )
 
-        modern = modern_version is not None
+        # A legacy version in _meta (some clients put the version they negotiated there) is one this server
+        # implements and lists as supported, so it is served with legacy semantics instead of being refused.
+        modern = modern_version is not None and modern_version not in LEGACY_VERSIONS
+        if modern_version is not None and modern_version not in SUPPORTED_VERSIONS:
+            return self._unsupported(msg_id, modern_version)
         if modern:
-            if modern_version not in MODERN_VERSIONS:
-                data = {"supported": list(SUPPORTED_VERSIONS), "requested": modern_version}
-                return _error(msg_id, UNSUPPORTED_PROTOCOL_VERSION, "Unsupported protocol version", 400, data)
             mismatch = self._header_mismatch(request, method, params, modern_version)
             if mismatch:
-                return _error(msg_id, HEADER_MISMATCH, f"Header mismatch: {mismatch}", 400)
+                data = {"expected": self._expected_headers(method, params, modern_version)}
+                return _error(msg_id, HEADER_MISMATCH, f"Header mismatch: {mismatch}", 400, data)
+        elif modern_version is not None:
+            if header_version is not None and header_version != modern_version:
+                data = {"expected": {"MCP-Protocol-Version": modern_version}}
+                return _error(
+                    msg_id, HEADER_MISMATCH, "Header mismatch: MCP-Protocol-Version does not match _meta", 400, data
+                )
         elif header_version is not None and header_version not in LEGACY_VERSIONS:
             if header_version in MODERN_VERSIONS:
                 return _error(msg_id, HEADER_MISMATCH, f"Header mismatch: _meta lacks {META_VERSION}", 400)
-            data = {"supported": list(SUPPORTED_VERSIONS), "requested": header_version}
-            return _error(msg_id, UNSUPPORTED_PROTOCOL_VERSION, "Unsupported protocol version", 400, data)
+            return self._unsupported(msg_id, header_version)
 
-        if modern and method in ("server/discover", "tools/list"):
+        if modern_version is not None and method in ("server/discover", "tools/list"):
             # Modern clients have no initialize; their first calls are one of these two.
             client_info = meta.get(META_CLIENT_INFO)  # type: ignore[union-attr]
             self.usage.record_client_name("mcp", client_info.get("name") if isinstance(client_info, dict) else None)
@@ -996,9 +1022,24 @@ class McpEndpoint:
             return _result(msg_id, {"resources": []})
         if method == "resources/templates/list":
             return _result(msg_id, {"resourceTemplates": []})
+        if method.startswith("notifications/") and not modern:
+            # A notification sent with an id by mistake (seen for notifications/initialized): acknowledge it.
+            return _result(msg_id, {})
         # Modern servers answer unknown methods with 404; a legacy client could mistake a 404 for an expired
         # session, so legacy requests get the JSON-RPC error with status 200.
         return _error(msg_id, METHOD_NOT_FOUND, f"Method not found: {method}", 404 if modern else 200)
+
+    def _unsupported(self, msg_id: Any, requested: Any) -> JSONResponse:
+        self.usage.count(f"mcp:version-refused:{_version_kind(requested)}")
+        data = {"supported": list(SUPPORTED_VERSIONS), "requested": requested}
+        return _error(msg_id, UNSUPPORTED_PROTOCOL_VERSION, "Unsupported protocol version", 400, data)
+
+    @staticmethod
+    def _expected_headers(method: str, params: dict[str, Any], version: str) -> dict[str, Any]:
+        expected: dict[str, Any] = {"MCP-Protocol-Version": version, "Mcp-Method": method}
+        if method == "tools/call" and isinstance(params.get("name"), str):
+            expected["Mcp-Name"] = params["name"]
+        return expected
 
     def _header_mismatch(self, request: Request, method: str, params: dict[str, Any], version: str) -> str | None:
         headers = request.headers
