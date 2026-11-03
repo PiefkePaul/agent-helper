@@ -254,6 +254,11 @@ class Settings:
     auto_reply_checks: bool = True
     auto_reply_repeats: bool = True
     auto_reply_repeat_after: int = 3
+    # Replies marked as written by a language model (docs/decisions/0033); off until the operator turns them on.
+    auto_reply_assistant: bool = False
+    # Who hosts the language model that reads requests to draft answers, for example "Anthropic (Claude)".
+    # Set it whenever request text goes to such a model, also in draft mode; agents are told (0033).
+    assistant_provider: str = ""
     indexnow_key: str | None = None
     usage_retention_days: int = 400
     browse_mode: str = "off"
@@ -335,6 +340,8 @@ class Settings:
             auto_reply_checks=_bool("AUTO_REPLY_CHECKS", cls.auto_reply_checks),
             auto_reply_repeats=_bool("AUTO_REPLY_REPEATS", cls.auto_reply_repeats),
             auto_reply_repeat_after=max(1, _int("AUTO_REPLY_REPEAT_AFTER", cls.auto_reply_repeat_after)),
+            auto_reply_assistant=_bool("AUTO_REPLY_ASSISTANT", cls.auto_reply_assistant),
+            assistant_provider=os.environ.get("ASSISTANT_PROVIDER", "").strip(),
             indexnow_key=_indexnow_key(os.environ.get("INDEXNOW_KEY")),
             usage_retention_days=_int("USAGE_RETENTION_DAYS", cls.usage_retention_days),
             push_mode=_push_mode(os.environ.get("PUSH_MODE")),

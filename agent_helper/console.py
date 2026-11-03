@@ -245,12 +245,18 @@ def _latest(messages: list[dict[str, Any]]) -> str:
         return ""
     last = messages[-1]
     if last["sender"] == "operator":
-        who = "automatic:" if last.get("automatic") else "you:"
+        who = {"assistant": "language model:", "assistant_reviewed": "you (drafted):"}.get(
+            last.get("author") or "", "automatic:" if last.get("automatic") else "you:"
+        )
         return f'<span class="note">{who}</span> {e(last["body"][:120])}'
     return agent_word(last["body"][:120])
 
 
 def _sender(message: dict[str, Any]) -> str:
+    if message.get("author") == "assistant":  # docs/decisions/0033
+        return "language model, not checked"
+    if message.get("author") == "assistant_reviewed":
+        return "operator (drafted by a language model)"
     if not message.get("automatic"):
         return e(message["sender"])
     if message.get("reused_from"):  # docs/decisions/0030

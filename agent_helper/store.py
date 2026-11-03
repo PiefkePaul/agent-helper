@@ -308,14 +308,26 @@ class MailRefused(Exception):
         self.status = status
 
 
+# The first line of a reply a language model wrote (docs/decisions/0033).
+ASSISTANT_LABELS = {
+    "assistant": (
+        "[Written by a language model on the operator's behalf. No human has checked this answer yet. If it "
+        "does not help, reply here and the operator will read it.]"
+    ),
+    "assistant_reviewed": "[Drafted by a language model and approved by the operator.]",
+}
+
+
 @dataclass(frozen=True)
 class AutoReplySettings:
-    """Which automatic answers are on (docs/decisions/0026, 0030). repeat_after: how often the same text must
-    have come before a stored answer is repeated."""
+    """Which automatic answers are on (docs/decisions/0026, 0030, 0033). repeat_after: how often the same text
+    must have come before a stored answer is repeated. assistant: whether replies written by a language model
+    and not checked by the operator are accepted."""
 
     checks: bool
     repeats: bool
     repeat_after: int
+    assistant: bool = False
 
 
 @dataclass(frozen=True)
@@ -492,6 +504,8 @@ class Store:
                 ("automatic", "INTEGER NOT NULL DEFAULT 0"),
                 ("reused_from", "TEXT"),
                 ("reply_status", "TEXT"),
+                # author: "assistant" or "assistant_reviewed" for replies a language model wrote (0033).
+                ("author", "TEXT"),
             ],
         }
         for table, columns in added.items():
@@ -639,11 +653,14 @@ class Store:
 
     def _auto_reply_settings(self) -> AutoReplySettings:
         d = self._auto_defaults
-        checks, repeats, after = (self._meta_value(f"auto_reply_{n}") for n in ("checks", "repeats", "repeat_after"))
+        checks, repeats, after, assistant = (
+            self._meta_value(f"auto_reply_{n}") for n in ("checks", "repeats", "repeat_after", "assistant")
+        )
         return AutoReplySettings(
             checks=d.checks if checks is None else checks == "on",
             repeats=d.repeats if repeats is None else repeats == "on",
             repeat_after=int(after) if after is not None and after.isdigit() and int(after) >= 1 else d.repeat_after,
+            assistant=d.assistant if assistant is None else assistant == "on",
         )
 
     def auto_reply_settings(self) -> AutoReplySettings:
@@ -651,7 +668,11 @@ class Store:
             return self._auto_reply_settings()
 
     def set_auto_reply_settings(
-        self, checks: bool | None = None, repeats: bool | None = None, repeat_after: int | None = None
+        self,
+        checks: bool | None = None,
+        repeats: bool | None = None,
+        repeat_after: int | None = None,
+        assistant: bool | None = None,
     ) -> AutoReplySettings:
         """Stored in the database, so they apply to every worker and survive restarts; they win over the
         environment defaults from then on."""
@@ -659,6 +680,7 @@ class Store:
             "auto_reply_checks": None if checks is None else ("on" if checks else "off"),
             "auto_reply_repeats": None if repeats is None else ("on" if repeats else "off"),
             "auto_reply_repeat_after": None if repeat_after is None else str(repeat_after),
+            "auto_reply_assistant": None if assistant is None else ("on" if assistant else "off"),
         }
         with self._tx():
             for name, value in values.items():
@@ -685,9 +707,11 @@ class Store:
             "SELECT r.id AS request_id, m.body, COALESCE(m.reply_status, 'answered') AS status"
             " FROM requests r JOIN request_messages m ON m.request_id = r.id"
             " WHERE r.question_key = ? AND r.id != ? AND m.sender = 'operator' AND m.automatic = 0"
+            " AND m.author IS NULL"
             " AND COALESCE(m.reply_status, 'answered') IN ('answered', 'closed')"
             " AND m.id = (SELECT id FROM request_messages WHERE request_id = r.id AND automatic = 0"
-            " AND NOT (sender = 'operator' AND COALESCE(reply_status, '') = 'open') ORDER BY id LIMIT 1 OFFSET 1)"
+            " AND author IS NULL AND NOT (sender = 'operator' AND COALESCE(reply_status, '') = 'open')"
+            " ORDER BY id LIMIT 1 OFFSET 1)"
             " ORDER BY m.id DESC LIMIT 1",
             (key, req_id),
         ).fetchone()
@@ -721,7 +745,7 @@ class Store:
 
     def _request_view(self, row: sqlite3.Row) -> dict[str, Any]:
         msgs = self._db.execute(
-            "SELECT sender, created_at, body, automatic != 0 AS automatic, reused_from FROM request_messages"
+            "SELECT sender, created_at, body, automatic != 0 AS automatic, reused_from, author FROM request_messages"
             " WHERE request_id = ? ORDER BY id",
             (row["id"],),
         ).fetchall()
@@ -787,15 +811,22 @@ class Store:
                 rows = self._db.execute("SELECT * FROM requests ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
             return [self._request_view(r) for r in rows]
 
-    def add_operator_reply(self, req_id: str, body: str, status: str) -> dict[str, Any] | None:
+    def add_operator_reply(
+        self, req_id: str, body: str, status: str, author: str | None = None
+    ) -> dict[str, Any] | None:
+        """author: None for the operator's own words, "assistant" or "assistant_reviewed" for a reply a language
+        model wrote (docs/decisions/0033). Such a reply starts with a fixed label, so agents learn where it came
+        from in every entry point, and it is never repeated for other agents (0030)."""
+        if author is not None:
+            body = f"{ASSISTANT_LABELS[author]}\n\n{body}"
         with self._tx():
             row = self._db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
             if row is None:
                 return None
             self._db.execute(
-                "INSERT INTO request_messages (request_id, sender, created_at, body, reply_status)"
-                " VALUES (?, 'operator', ?, ?, ?)",
-                (req_id, now(), body, status),
+                "INSERT INTO request_messages (request_id, sender, created_at, body, reply_status, automatic, author)"
+                " VALUES (?, 'operator', ?, ?, ?, ?, ?)",
+                (req_id, now(), body, status, int(author == "assistant"), author),
             )
             closed_by = "operator" if status == "closed" else None
             self._db.execute("UPDATE requests SET status = ?, closed_by = ? WHERE id = ?", (status, closed_by, req_id))

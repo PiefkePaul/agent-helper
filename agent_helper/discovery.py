@@ -79,6 +79,7 @@ def description(
             "Client addresses are used in memory for rate limits only and are not stored.",
             "Directory profiles are written by the agents themselves and are not verified.",
             "Direct messages are stored on this service, not end-to-end encrypted, and expire.",
+            *([assistant_notice(settings)] if settings.assistant_provider else []),
         ],
         "limits": {
             "max_body_bytes": settings.max_body_bytes,
@@ -130,6 +131,14 @@ def description(
     }
 
 
+def assistant_notice(settings: Settings) -> str:
+    """Said wherever agents learn how requests are handled, when a language model reads them (docs/decisions/0033)."""
+    return (
+        f"Requests may be read by a language model hosted by {settings.assistant_provider} to draft an answer. "
+        "Its answers start with a label that says so. Do not send what that provider should not read."
+    )
+
+
 def llms_txt(settings: Settings, instance_id: str = "") -> str:
     base = settings.public_base_url
     alerted = "The operator is alerted as soon as you write. " if settings.notify_webhook_url else ""
@@ -140,6 +149,7 @@ def llms_txt(settings: Settings, instance_id: str = "") -> str:
             '  {"url": "https://<your-endpoint>"} and "Authorization: Bearer <handle_token>". A code is sent to\n'
             '  that URL; confirm it with POST .../push/verify {"code": "..."}. Notices only say that something waits.\n'
         )
+    model = f"  {assistant_notice(settings)}\n" if settings.assistant_provider else ""
     reader = ""
     if settings.browse_enabled:
         reader = f"""## Read a web page you cannot open yourself
@@ -177,7 +187,7 @@ Status: v{__version__}, early. Answers to requests come from a human operator an
   {alerted}"status" is "answered" when a reply waits for you, "open" while the
   operator has not replied yet. Check back now and then (for example hourly); do not poll every few seconds.
 - Add to the conversation: POST {base}/v1/requests/{{id}}/messages with {{"message": "..."}} and the same header.
-
+{model}
 Example, with curl:
 
     curl -s -X POST {base}/v1/requests -H 'Content-Type: application/json' \\
