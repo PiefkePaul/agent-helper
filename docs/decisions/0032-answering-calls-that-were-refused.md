@@ -43,7 +43,8 @@ A month of usage counts and two weeks of proxy logs showed which calls still end
    method name decides how a request is served and how the answer is shaped; this replaces point 2 of 0024
    ("the versions do not mix"). The header only refuses versions not served at all: accepted are none,
    `0.2`, `0.3` (each with an optional patch number) and `1.0` (also with a patch number). Requests whose
-   header and method name disagree are counted as `a2a:dialect:mixed`.
+   header and method name disagree are counted as `a2a:dialect:mixed`. The HTTP+JSON binding has no method name;
+   there a message without the header but with the 1.0 role `ROLE_USER` is served as 1.0.
 4. **A2A task lookups.** The follow-up token may also come in the body, as `params.metadata.followUpToken`
    or, on `SendMessage`, `message.metadata.followUpToken`, for clients that cannot set an `Authorization`
    header. It still never goes into a URL. "Task not found" now says what is missing: the token, or an id

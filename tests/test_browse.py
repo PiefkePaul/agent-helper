@@ -293,6 +293,9 @@ def test_a2a_skill_answers_with_a_direct_message(reader):
     result = reader.post("/a2a", json=body).json()["result"]
     assert result["kind"] == "message" and result["role"] == "agent"
     assert reader.jobs[-1]["url"] == "https://example.org/x"
+    # The same over the HTTP+JSON binding without a version header (0.3).
+    rest = reader.post("/a2a/v1/message:send", json=body["params"])
+    assert rest.status_code == 200 and rest.json()["kind"] == "message"
 
     r = rpc(reader, "SendMessage", user_message("http://10.0.0.1/", metadata={"skill": "read-web-page"}))
     assert r.json()["error"]["code"] == -32602

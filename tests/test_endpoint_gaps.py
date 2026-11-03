@@ -90,6 +90,13 @@ def test_unknown_methods_without_a_version_are_unknown_methods(client):
     assert r.json()["error"]["code"] == -32601
 
 
+def test_rest_send_without_header_takes_a_1_0_message_as_1_0(client):
+    r = client.post("/a2a/v1/message:send", json=user_message("hello"))
+    assert r.status_code == 200 and r.json()["task"]["status"]["state"] == "TASK_STATE_SUBMITTED"
+    old = client.post("/a2a/v1/message:send", json=message03("hello"))
+    assert old.status_code == 200 and old.json()["kind"] == "task"
+
+
 def test_the_follow_up_token_may_come_in_the_body(client):
     task = start(client)
     token = task["metadata"]["followUpToken"]

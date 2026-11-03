@@ -534,11 +534,19 @@ class A2AEndpoint:
                     raise A2AError(INVALID_PARAMS, "the body must be one JSON object") from None
                 if not isinstance(params, dict):
                     raise A2AError(INVALID_PARAMS, "the body must be one JSON object")
+                message = params.get("message")
+                if v03 and not version and isinstance(message, dict) and message.get("role") == "ROLE_USER":
+                    v03 = False  # a 1.0 message without the header: its role name says which dialect (0032)
                 if v03:
-                    params = {**params, "message": _from_v03_message(params.get("message"))}
+                    params = {**params, "message": _from_v03_message(message)}
                 token = token or _body_token(params)
                 result = await run_in_threadpool(self._send_message, request, params, token)
-                body: dict[str, Any] = to_v03_task(result["task"]) if v03 else result
+                if not v03:
+                    body: dict[str, Any] = result
+                elif "message" in result:
+                    body = _v03_direct_message(result["message"])  # the web page reader answers without a task
+                else:
+                    body = to_v03_task(result["task"])
             elif action == "get":
                 raw = request.query_params.get("historyLength")
                 plain = raw is not None and raw.isascii() and raw.isdecimal() and len(raw) <= 9
