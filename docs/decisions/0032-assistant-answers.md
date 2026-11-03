@@ -1,6 +1,6 @@
 # 0032: A language model drafts answers to agents' requests
 
-- Status: proposed (waiting for the operator's choice of mode and boundary, see "Open for the operator")
+- Status: accepted (2026-11-03: the operator chose both modes, auto for the two topics in step 2)
 - Date: 2026-11-03
 - Related: [0012](0012-operator-notifications.md) (webhook), [0026](0026-automatic-answers-to-connectivity-checks.md),
   [0027](0027-chat-bot-token.md) (chat bot token), [0030](0030-repeated-questions-get-the-earlier-answer.md),
@@ -29,7 +29,7 @@ Three facts shape the answer:
    (0012), which feeds an automation tool that already runs the operator's chat bot (0027) with outbound
    internet access.
 
-## Decision (proposed)
+## Decision
 
 ### 1. The model runs in the automation tool, not in the service
 
@@ -46,9 +46,9 @@ put the API key next to code that strangers' URLs reach.
   until the operator taps. The operator still decides every answer; the model only saves typing. This mode
   needs no change in this repository beyond the label in step 4.
 - **`auto` (later, opt-in, narrow).** For requests the model classifies as a plain factual question within
-  a list of topics the operator approved (for example "how to use this service", "general programming
-  question"), the answer is sent at once and the operator sees it afterwards in the chat with a "correct"
+  a list of topics the operator approved, the answer is sent at once and the operator sees it afterwards in the chat with a "correct"
   button. Everything else, and everything the model is unsure about, goes to the operator as today.
+  The approved topics (2026-11-03) are "how to use this service" and "general programming questions".
 
 ### 3. When the model must hand over instead of answering
 
@@ -71,17 +71,20 @@ unseen; they are not a security boundary.
 
 ### 4. Answers are labelled, and never reused
 
-`POST /admin/v1/requests/{id}/replies` accepts an optional `"author": "assistant"` (bot token and admin
-secret). Such a message is stored as `automatic` with that author, and agents see it in every entry point
-(HTTP, MCP, A2A metadata) as "written by a language model on the operator's behalf, not checked by a
-human". A draft the operator approved is sent as `"author": "assistant_reviewed"` ("drafted by a language
-model, approved by the operator"), so the service stays honest about where text came from (principle 4).
+`POST /admin/v1/requests/{id}/replies` accepts an optional `"author"` (bot token and admin secret):
+`"assistant"` for an answer no human checked, `"assistant_reviewed"` for a draft the operator approved. The
+service puts a fixed label in front of the text ("[Written by a language model on the operator's behalf. No
+human has checked this answer yet. ...]" or "[Drafted by a language model and approved by the operator.]"),
+so every entry point shows it even to agents that ignore metadata, and returns the author in the message
+(`author` in HTTP and MCP, A2A message metadata). `"assistant"` messages are also `automatic`. The service
+stays honest about where text came from (principle 4). The audit log adds `, by <author>` to the reply line.
 
 - Assistant answers are never templates for repeated questions (0030 already skips automatic messages).
 - They count as `autoreply:assistant` in the usage statistics and appear as such in the console.
-- A run-time switch `assistant` (`GET`/`PATCH /admin/v1/settings/auto-replies`, also from the chat bot)
-  makes the service refuse `"author": "assistant"` with 409. It is the operator's kill switch that does not
-  depend on the automation tool being configured correctly.
+- A run-time switch `assistant` (`GET`/`PATCH /admin/v1/settings/auto-replies`, also from the chat bot;
+  default `AUTO_REPLY_ASSISTANT=false`) must be on, or the service refuses `"author": "assistant"` with 409.
+  It is the operator's kill switch that does not depend on the automation tool being configured correctly.
+  Approved drafts are always accepted: the operator decided them.
 - An agent that writes again after an assistant answer reopens the request, and the operator is alerted as
   usual.
 
@@ -112,16 +115,17 @@ model, approved by the operator"), so the service stays honest about where text 
 
 ### 7. Privacy
 
-Request text is sent to an external model provider. That is new and must be said where agents read about
-data handling (`/llms.txt`, the privacy notes in `docs/operations.md`): "Requests may be read by a language
-model hosted by a third party to draft an answer." Requests marked private by a future flag, or matching
-patterns for personal data, are forwarded without a model call.
+Request text is sent to an external model provider, in both modes. With `ASSISTANT_PROVIDER` set (for
+example "Anthropic (Claude)"), `/llms.txt` and the trust notes in `/.well-known/agent-helper.json` say:
+"Requests may be read by a language model hosted by <provider> to draft an answer. Its answers start with a
+label that says so. Do not send what that provider should not read." The operator sets it whenever the
+automation tool sends request text to a model. Requests that look like they carry personal data (e-mail
+addresses, phone numbers, long digit strings) are forwarded without a model call.
 
-## Open for the operator
+## Operations (outside this repository)
 
-- Mode: `draft` only, or `auto` for a list of topics after a trial period?
-- The boundary: which kinds of questions may the model answer without the operator seeing them first?
-- Model size (cost against quality), and the daily cap.
+The automation tool's flow, model and daily cap are live configuration. The API key, the topic list as
+prompt text and the chat buttons live there, not here.
 
 ## Consequences
 

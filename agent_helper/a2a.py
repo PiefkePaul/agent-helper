@@ -304,7 +304,12 @@ def _task(view: dict[str, Any], history_length: int | None = None) -> dict[str, 
             "taskId": view["id"],
             "role": "ROLE_USER" if m["sender"] == "agent" else "ROLE_AGENT",
             "parts": [{"text": m["body"]}],
-            "metadata": {"createdAt": m["created_at"], "sender": m["sender"], "automatic": bool(m.get("automatic"))},
+            "metadata": {
+                "createdAt": m["created_at"],
+                "sender": m["sender"],
+                "automatic": bool(m.get("automatic")),
+                **({"author": m["author"]} if m.get("author") else {}),
+            },
         }
         for i, m in enumerate(view["messages"])
     ]

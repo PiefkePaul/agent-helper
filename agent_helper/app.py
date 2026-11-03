@@ -131,6 +131,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             checks=settings.auto_reply_checks,
             repeats=settings.auto_reply_repeats,
             repeat_after=settings.auto_reply_repeat_after,
+            assistant=settings.auto_reply_assistant,
         ),
         revoked_key_ids=settings.revoked_key_ids,
     )
@@ -964,21 +965,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @admin.patch("/settings/auto-replies")
     def admin_set_auto_replies(body: AutoRepliesIn, request: Request) -> dict[str, Any]:
-        found = store.set_auto_reply_settings(body.checks, body.repeats, body.repeat_after)
+        found = store.set_auto_reply_settings(body.checks, body.repeats, body.repeat_after, body.assistant)
         via = getattr(request.state, "via", "admin API")
         audit.info(
-            "operator set auto-replies: checks=%s repeats=%s repeat_after=%d via %s",
-            found.checks, found.repeats, found.repeat_after, via,
+            "operator set auto-replies: checks=%s repeats=%s repeat_after=%d assistant=%s via %s",
+            found.checks, found.repeats, found.repeat_after, found.assistant, via,
         )  # fmt: skip
         return dataclasses.asdict(found)
 
     @admin.post("/requests/{req_id}/replies")
     def admin_reply(req_id: str, body: OperatorReplyIn, request: Request) -> RequestOut:
-        found = store.add_operator_reply(req_id, body.message, body.status)
+        if body.author == "assistant" and not store.auto_reply_settings().assistant:
+            # The operator's kill switch for unchecked language model answers (docs/decisions/0032).
+            raise HTTPException(409, "replies by a language model are switched off (auto-replies: assistant)")
+        found = store.add_operator_reply(req_id, body.message, body.status, body.author)
         if found is None:
             raise HTTPException(404, "no such request")
         via = getattr(request.state, "via", "admin API")
-        audit.info("operator reply to %s (%s) via %s", req_id, body.status, via)
+        by = f", by {body.author}" if body.author else ""
+        audit.info("operator reply to %s (%s%s) via %s", req_id, body.status, by, via)
+        if body.author == "assistant":
+            app.state.usage.count("autoreply:assistant")
         return RequestOut(**found)
 
     @admin.post("/requests/{req_id}/referrals")
