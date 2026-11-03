@@ -281,7 +281,8 @@ def test_the_bot_can_read_and_change_the_settings(make_client):
     client = make_client(operator_bot_token=BOT_TOKEN)
     bot = {"Authorization": f"Bearer {BOT_TOKEN}"}
     url = "/admin/v1/settings/auto-replies"
-    assert client.get(url, headers=bot).json() == {"checks": True, "repeats": True, "repeat_after": 3, "assistant": False}
+    expected = {"checks": True, "repeats": True, "repeat_after": 3, "assistant": False}
+    assert client.get(url, headers=bot).json() == expected
     r = client.patch(url, json={"repeat_after": 1}, headers=bot)
     assert r.json() == {"checks": True, "repeats": True, "repeat_after": 1, "assistant": False}
     first, _ = _ask(client)

@@ -5,6 +5,7 @@ import logging
 import pytest
 from conftest import ADMIN_SECRET
 from test_a2a import rpc, start
+from test_console import console  # noqa: F401 (fixture)
 from test_mcp import call
 
 from agent_helper.store import ASSISTANT_LABELS
@@ -74,12 +75,15 @@ def test_off_by_default_and_switchable_at_run_time(make_client):
     assert _reply(client, created["id"], "assistant").status_code == 409
     assert _reply(client, created["id"], "assistant_reviewed").status_code == 200  # the operator approved it
     bot = {"Authorization": f"Bearer {BOT}"}
-    assert client.get("/admin/v1/settings/auto-replies", headers=bot).json()["assistant"] is False
-    r = client.patch("/admin/v1/settings/auto-replies", json={"assistant": True}, headers=bot)
+    url = "/admin/v1/settings/auto-replies"
+    assert client.get(url, headers=bot).json()["assistant"] is False
+    assert client.patch(url, json={"assistant": True}, headers=bot).status_code == 403  # the bot cannot
+    assert client.get(url, headers=bot).json()["assistant"] is False
+    r = client.patch(url, json={"assistant": True}, headers=ADMIN)
     assert r.status_code == 200 and r.json()["assistant"] is True
-    assert _reply(client, created["id"], "assistant").status_code == 200
-    client.patch("/admin/v1/settings/auto-replies", json={"assistant": False}, headers=bot)
-    assert _reply(client, created["id"], "assistant").status_code == 409
+    assert _reply(client, created["id"], "assistant", headers=bot).status_code == 200
+    assert client.patch(url, json={"assistant": False}, headers=bot).status_code == 200  # ... but can stop it
+    assert _reply(client, created["id"], "assistant", headers=bot).status_code == 409
     assert len(_view(client, created)["messages"]) == 3  # the refused reply left nothing behind
 
 
@@ -91,7 +95,28 @@ def test_language_model_answers_are_never_repeated(client, author):
     assert second["status"] == "open" and len(second["messages"]) == 1
 
 
-def test_label_reaches_mcp_a2a_and_console(client):
+@pytest.mark.parametrize("author", ["assistant", "assistant_reviewed"])
+def test_a_human_correction_after_a_model_answer_is_the_template(client, author):
+    first = _ask(client)
+    _reply(client, first["id"], author)
+    _reply(client, first["id"], None, message="The corrected answer.")
+    second = _view(client, _ask(client))
+    assert second["messages"][1]["body"] == "The corrected answer." and second["messages"][1]["author"] is None
+
+
+def test_console_shows_who_wrote_it(console):  # noqa: F811
+    client, _ = console
+    created = _ask(client)
+    client.app.state.store.set_auto_reply_settings(assistant=True)
+    _reply(client, created["id"], "assistant")
+    assert "language model:" in client.get("/admin/console/requests").text
+    page = client.get(f"/admin/console/requests/{created['id']}").text
+    assert "language model, not checked" in page
+    _reply(client, created["id"], "assistant_reviewed")
+    assert "operator (drafted by a language model)" in client.get(f"/admin/console/requests/{created['id']}").text
+
+
+def test_label_reaches_mcp_and_a2a(client):
     created = call(client, "describe_need", {"message": "Something only a model would answer."})["structuredContent"]
     _reply(client, created["id"], "assistant")
     read = call(client, "read_request", {"id": created["id"], "follow_up_token": created["follow_up_token"]})
@@ -101,6 +126,7 @@ def test_label_reaches_mcp_a2a_and_console(client):
     _reply(client, task["id"], "assistant")
     seen = rpc(client, "GetTask", {"id": task["id"]}, token=task["metadata"]["followUpToken"]).json()["result"]
     assert seen["history"][1]["metadata"]["author"] == "assistant"
+    assert seen["status"]["message"]["metadata"] == {"author": "assistant"}
     assert "author" not in seen["history"][0]["metadata"]
 
 

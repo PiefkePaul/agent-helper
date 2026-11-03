@@ -326,6 +326,7 @@ def _task(view: dict[str, Any], history_length: int | None = None) -> dict[str, 
                 "taskId": view["id"],
                 "role": "ROLE_AGENT",
                 "parts": [{"text": last["body"]}],
+                **({"metadata": {"author": last["author"]}} if last.get("author") else {}),
             }
     return {"id": view["id"], "contextId": view["id"], "status": status, "history": history}
 

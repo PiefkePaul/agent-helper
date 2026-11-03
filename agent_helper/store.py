@@ -710,7 +710,8 @@ class Store:
             " AND m.author IS NULL"
             " AND COALESCE(m.reply_status, 'answered') IN ('answered', 'closed')"
             " AND m.id = (SELECT id FROM request_messages WHERE request_id = r.id AND automatic = 0"
-            " AND NOT (sender = 'operator' AND COALESCE(reply_status, '') = 'open') ORDER BY id LIMIT 1 OFFSET 1)"
+            " AND author IS NULL AND NOT (sender = 'operator' AND COALESCE(reply_status, '') = 'open')"
+            " ORDER BY id LIMIT 1 OFFSET 1)"
             " ORDER BY m.id DESC LIMIT 1",
             (key, req_id),
         ).fetchone()

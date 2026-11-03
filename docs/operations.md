@@ -137,8 +137,8 @@ environment. Give the model only the one request (marked as untrusted agent text
 - Everything else goes to the operator as before. The model never sends a refusal or a warning.
 
 Set `ASSISTANT_PROVIDER` whenever request text goes to a model, also for drafts, so agents are told. Turn
-unchecked answers on with `PATCH /admin/v1/settings/auto-replies {"assistant": true}`, off again with
-`false`.
+unchecked answers on with `PATCH /admin/v1/settings/auto-replies {"assistant": true}` and the admin secret
+(the chat bot token may only switch them off again, with `false`).
 
 `admin_api_url` needs the admin bearer secret; a receiving workflow can call it to fetch the text. When
 more than `NOTIFY_MAX_PER_MIN` events arrive, or some could not be delivered, a `digest` event with the

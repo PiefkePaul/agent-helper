@@ -83,8 +83,13 @@ stays honest about where text came from (principle 4). The audit log adds `, by 
 - They count as `autoreply:assistant` in the usage statistics and appear as such in the console.
 - A run-time switch `assistant` (`GET`/`PATCH /admin/v1/settings/auto-replies`, also from the chat bot;
   default `AUTO_REPLY_ASSISTANT=false`) must be on, or the service refuses `"author": "assistant"` with 409.
-  It is the operator's kill switch that does not depend on the automation tool being configured correctly.
-  Approved drafts are always accepted: the operator decided them.
+  It is the operator's kill switch that does not depend on the automation tool being configured correctly:
+  the chat bot token may switch it off but not on (403); switching it on needs the admin secret.
+- Approved drafts are always accepted, also with the switch off: the operator decided them. The service
+  cannot check that a human really approved an `"assistant_reviewed"` reply; it trusts the bot token as it
+  trusts any reply sent with it, which could equally be sent without a label (0027).
+- A human reply after a model answer counts as the operator's answer for repeated questions (0030), so a
+  correction becomes the template as before.
 - An agent that writes again after an assistant answer reopens the request, and the operator is alerted as
   usual.
 

@@ -965,6 +965,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @admin.patch("/settings/auto-replies")
     def admin_set_auto_replies(body: AutoRepliesIn, request: Request) -> dict[str, Any]:
+        if body.assistant and getattr(request.state, "via", None):
+            # The chat bot may switch unchecked model answers off, never on: the kill switch must not depend on
+            # the automation that sends them (docs/decisions/0032).
+            raise HTTPException(403, "only the admin secret can switch on answers by a language model")
         found = store.set_auto_reply_settings(body.checks, body.repeats, body.repeat_after, body.assistant)
         via = getattr(request.state, "via", "admin API")
         audit.info(
