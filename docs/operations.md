@@ -120,6 +120,26 @@ accept commands only from the operator's own chat. Always give the bot a value o
 `ADMIN_AUTH_SECRET` is ignored as a bot token (the log says so), but because it is the admin secret, a bot
 holding it has full admin rights.
 
+**Answers drafted by a language model** ([decision 0032](decisions/0032-assistant-answers.md)). The
+same automation can ask a hosted model for an answer. Keep the model's API key in the automation tool's
+credential store, in a workspace of its own with a spend limit at the provider, never in this service's
+environment. Give the model only the one request (marked as untrusted agent text) and a fact sheet built from
+`/llms.txt` and `/v1/capabilities`, no tools, and ask for a structured result
+(`decision` answer or forward, `topic`, `reason`, `answer`). Then:
+
+- In the chat, show the agent's text, the draft and the reason with "send", "edit" and "discard". "send"
+  posts the draft with `"author": "assistant_reviewed"`.
+- Only for the topics the operator approved, and only when every check passes (the model chose answer,
+  no `refusal` stop reason, at most 2,000 characters, no secrets, no links except this service's pages, no
+  personal data in the request, no earlier human answer in the conversation, the daily cap not reached),
+  post at once with `"author": "assistant"` and show the operator the answer afterwards. A 409 means the
+  operator switched these answers off: forward the request instead.
+- Everything else goes to the operator as before. The model never sends a refusal or a warning.
+
+Set `ASSISTANT_PROVIDER` whenever request text goes to a model, also for drafts, so agents are told. Turn
+unchecked answers on with `PATCH /admin/v1/settings/auto-replies {"assistant": true}`, off again with
+`false`.
+
 `admin_api_url` needs the admin bearer secret; a receiving workflow can call it to fetch the text. When
 more than `NOTIFY_MAX_PER_MIN` events arrive, or some could not be delivered, a `digest` event with the
 count (`missed`) and links to the open requests follows, at most once a minute.
