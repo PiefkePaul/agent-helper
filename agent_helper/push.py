@@ -38,7 +38,10 @@ MAX_BODY = 1024
 TICK_SECONDS = 2.0
 SWEEP_SECONDS = 600.0
 # The relay may retry for up to 3.5 minutes; together a notice stays inside receivers' 5-minute window.
-OUTBOX_MAX_AGE = 60.0
+# How long a notice waits for the relay to accept it (for example while the service's address changed and
+# the relay's allowlist has not caught up). Notices are signed only when they are handed over, so their
+# signed timestamp stays inside the receivers' 5-minute window however long they waited here.
+OUTBOX_MAX_AGE = 900.0
 OUTSTANDING_MAX_AGE = 900.0
 OPT_OUT_TEXT = (
     "This is a one-time check from an agent-helper service: someone registered this URL to receive short "
@@ -154,7 +157,10 @@ class PushManager:
         self.allow_domains = parse_list(settings.push_allowed_domains) if settings.push_mode == "allowlist" else None
         self.allowed_ports = tuple(int(p) for p in parse_list(settings.push_allowed_ports) if p.isdigit()) or (443,)
         self._events: queue.Queue[tuple[str, str, Any]] = queue.Queue(maxsize=10_000)
-        self._outbox: collections.deque[tuple[float, dict[str, Any]]] = collections.deque(maxlen=2_000)
+        # (queued at, subscription id, kind, url, secret, payload): signed at hand-over, not before.
+        self._outbox: collections.deque[tuple[float, str, str, str, str, dict[str, Any]]] = collections.deque(
+            maxlen=2_000
+        )
         self._outstanding: dict[str, tuple[str, str, float]] = {}  # job_id -> (subscription id, kind, sent at)
         self._after = 0
         self._last_sweep = -1e9
@@ -253,22 +259,23 @@ class PushManager:
         # Ids are short, but the body must stay under 1 KiB whatever they hold: drop the oldest ones.
         while True:
             try:
-                job = signed_job(kind, sub["url"], sub["secret"], payload)
+                signed_job(kind, sub["url"], sub["secret"], payload)  # only to check the size
                 break
             except ValueError:
                 if not payload.get("events"):
                     log.warning("push notice too large; dropped")
                     return
                 payload["events"] = payload["events"][1:]
-        job["_sub"] = sub["id"]
-        self._outbox.append((self.clock(), job))
+        self._outbox.append((self.clock(), sub["id"], kind, sub["url"], sub["secret"], payload))
 
     def _flush(self, now: float) -> None:
         while self._outbox and now - self._outbox[0][0] > OUTBOX_MAX_AGE:
             self._outbox.popleft()
+            log.warning("push notice dropped: the relay did not take it in time")
         while self._outbox:
             batch = [self._outbox[i] for i in range(min(MAX_JOBS_PER_CALL, len(self._outbox)))]
-            jobs = [{k: v for k, v in job.items() if not k.startswith("_")} for _, job in batch]
+            # Signed now, with a fresh timestamp: the receiver's 5-minute window starts at hand-over.
+            jobs = [signed_job(kind, url, secret, payload) for _, _, kind, url, secret, payload in batch]
             try:
                 status, _ = self.transport.call(  # type: ignore[union-attr]
                     "POST", "/v1/relay/jobs", json.dumps({"jobs": jobs}).encode()
@@ -279,9 +286,9 @@ class PushManager:
             if status != 200:
                 log.warning("push relay refused jobs: HTTP %s", status)
                 return
-            for _, job in batch:
+            for (_, sub_id, kind, *_rest), job in zip(batch, jobs, strict=True):
                 self._outbox.popleft()
-                self._outstanding[job["job_id"]] = (job["_sub"], job["kind"], now)
+                self._outstanding[job["job_id"]] = (sub_id, kind, now)
 
     def _collect(self, now: float) -> None:
         self._outstanding = {k: v for k, v in self._outstanding.items() if now - v[2] < OUTSTANDING_MAX_AGE}

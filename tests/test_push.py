@@ -1119,3 +1119,81 @@ def test_the_relay_port_is_free_to_choose(monkeypatch):
     relay = HttpsRelay(url, RELAY_SECRET)
     assert (relay.host, relay.port) == ("relay.example.invalid", 8443)
     assert HttpsRelay("https://relay.example.invalid", RELAY_SECRET).port == 443
+
+
+def test_notices_wait_for_the_relay_long_enough_and_are_signed_at_hand_over(pushing, monkeypatch):
+    import agent_helper.push as push_module
+
+    client, push, sender, clock = pushing
+    token = _handle(client)
+    push.transport.up = False
+    client.put(
+        "/v1/handles/nova/push",
+        json={"url": "https://hooks.example.com/in"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    push.tick()
+    clock.now += 14 * 60  # the relay refuses the service for a while (a new address not yet allowed)
+    push.tick()
+    assert sender.post.calls == []
+    push.transport.up = True
+    monkeypatch.setattr(push_module.time, "time", lambda: 2_000_000_000.0)
+    push.tick()
+    sender.run_due()
+    _, _, headers, _ = sender.post.calls[-1]
+    assert headers["X-Agent-Helper-Timestamp"] == "2000000000"  # signed when handed over, not when queued
+
+
+def test_notices_older_than_the_limit_are_dropped(pushing):
+    client, push, sender, clock = pushing
+    token = _handle(client)
+    push.transport.up = False
+    client.put(
+        "/v1/handles/nova/push",
+        json={"url": "https://hooks.example.com/in"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    push.tick()
+    clock.now += 16 * 60
+    push.transport.up = True
+    push.tick()
+    sender.run_due()
+    assert sender.post.calls == []
+
+
+def test_relay_looks_names_up_again_after_refusing_a_caller():
+    from agent_helper.relay import ClientFilter
+
+    clock = FakeClock()
+    answers = {"home.example.net": ["93.184.215.14"]}
+    lookups = []
+
+    def resolver(host, port):
+        lookups.append(host)
+        return answers[host]
+
+    flt = ClientFilter(("home.example.net",), resolver=resolver, clock=clock)
+    flt.refresh_if_stale()
+    answers["home.example.net"] = ["93.184.215.99"]  # the service's address changed
+    assert not flt.allows("93.184.215.99")
+    assert flt.refresh_after_refusal() and flt.allows("93.184.215.99")
+    assert not flt.refresh_after_refusal()  # rate-limited
+    clock.now += 31
+    assert flt.refresh_after_refusal()
+    assert len(lookups) == 3
+
+
+def test_relay_middleware_retries_a_refused_caller_once(tmp_path):
+    from agent_helper.relay import ClientFilter
+
+    answers = {"home.example.net": ["198.51.100.1"]}
+    flt = ClientFilter(("home.example.net",), resolver=lambda h, p: answers[h])
+    flt.refresh_if_stale()
+    sender, _, _ = _sender(tmp_path)
+    app = create_relay_app(RelaySettings(secret=RELAY_SECRET, data_dir=tmp_path / "relay"), sender, flt)
+    answers["home.example.net"] = ["198.51.100.7"]
+    client = TestClient(app, client=("198.51.100.7", 40000))
+    body = json.dumps({"jobs": [_job()]}).encode()
+    assert (
+        client.post("/v1/relay/jobs", content=body, headers=_signed("POST", "/v1/relay/jobs", body)).status_code == 200
+    )
