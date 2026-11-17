@@ -33,11 +33,9 @@ jobs:
   docker:
     needs: test
     if: github.server_url != 'https://github.com' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    runs-on: ubuntu-latest
+    # Image builds run on the operator's own build slots, which have Docker; the general runner has none.
+    runs-on: [self-hosted, nas, agent-helper]
     env:
-      # The Gitea runner has no Docker socket in the job container; its Docker-in-Docker daemon listens
-      # on the shared host network. Not set on GitHub, where the hosted runner has its own socket.
-      DOCKER_HOST: ${{ github.server_url != 'https://github.com' && 'tcp://127.0.0.1:2375' || '' }}
       # Push only from main on Gitea; pull requests and other branches only build.
       PUSH: ${{ github.server_url != 'https://github.com' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     steps:
