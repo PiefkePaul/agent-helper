@@ -106,6 +106,9 @@ def load_file_entries(settings: Settings) -> list[Capability]:
         raw = json.loads(resources.files("agent_helper").joinpath("capabilities.json").read_text(encoding="utf-8"))
     entries = []
     for item in raw.get("capabilities", []):
+        if not isinstance(item, dict):
+            log.warning("skipping invalid catalog entry: expected an object")
+            continue
         try:
             entries.append(Capability.model_validate(_from_v01(item)))
         except ValidationError as exc:
